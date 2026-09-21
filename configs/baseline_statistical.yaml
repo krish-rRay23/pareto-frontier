@@ -1,0 +1,31 @@
+# Statistical Baseline Configuration
+
+experiment:
+  id: "baseline_statistical"
+  seed: 42
+  notes: "Category-grouped median prediction as a lower-bound sanity benchmark"
+
+data:
+  train_path: "data/raw/train.csv"
+  test_path: "data/raw/test.csv"
+  id_col: "sample_id"
+  target_col: "target_price"
+  group_col: "category"
+  allow_zero_target: false
+
+validation:
+  strategy: "stratified"
+  n_splits: 5
+  seed: 42
+  n_bins: 10
+
+model:
+  type: "statistical"
+  params:
+    aggregation: "median"
+    group_col: "category"
+
+output:
+  submission_dir: "artifacts/submissions"
+  submission_filename: "baseline_stat_sub.csv"
+  target_name_in_sub: "prediction"
