@@ -1,19 +1,19 @@
 """Inference module exports."""
 
-from src.inference.predict import (
-    generate_submission_file,
-    load_fold_models,
-    predict_from_checkpoints,
+from src.inference.decision_policy import (
+    PrecisionDecisionPolicy,
+    optimize_decision_policy,
 )
+from src.inference.pipeline import EntityResolutionPipeline
 from src.inference.submission_validator import (
-    SubmissionValidationReport,
-    validate_submission_file,
+    ERValidationReport,
+    validate_submission_package,
 )
 
 __all__ = [
-    "load_fold_models",
-    "predict_from_checkpoints",
-    "generate_submission_file",
-    "SubmissionValidationReport",
-    "validate_submission_file",
+    "PrecisionDecisionPolicy",
+    "optimize_decision_policy",
+    "EntityResolutionPipeline",
+    "ERValidationReport",
+    "validate_submission_package",
 ]

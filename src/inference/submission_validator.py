@@ -1,38 +1,42 @@
-"""Comprehensive submission validator for competition deliverables."""
+"""Official ML Challenge 2026 Submission Validator."""
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
-from typing import List, Union
+import subprocess
+import sys
+from typing import Dict, List, Optional, Set, Tuple
 
-import numpy as np
-import pandas as pd
+
+DELIM = "\t"
+MATCHING_HEADER = ["source1_entity_id", "matched_entity_ids"]
+CANDIDATE_HEADER = ["source1_entity_id", "candidate_entity_ids"]
 
 
 @dataclass
-class SubmissionValidationReport:
-    """Diagnostic report from submission integrity verification."""
+class ERValidationReport:
+    """Diagnostic report for entity resolution submission files."""
 
     is_valid: bool = True
-    row_count: int = 0
-    test_row_count: int = 0
-    column_names: List[str] = field(default_factory=list)
-    id_mismatches: int = 0
-    order_mismatches: int = 0
-    nan_count: int = 0
-    inf_count: int = 0
-    negative_count: int = 0
-    zero_count: int = 0
+    matching_rows: int = 0
+    candidate_rows: int = 0
+    expected_s1_count: int = 0
+    empty_matches_count: int = 0
+    empty_candidates_count: int = 0
+    matches_not_in_candidates_count: int = 0
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
     def summary(self) -> str:
         status = "PASSED" if self.is_valid else "FAILED"
         lines = [
-            f"=== Submission Validation Report [{status}] ===",
-            f"Submission Rows: {self.row_count} (Expected: {self.test_row_count})",
-            f"Columns: {self.column_names}",
-            f"NaN: {self.nan_count}, Inf: {self.inf_count}, Negatives: {self.negative_count}, Zeros: {self.zero_count}",
+            f"=== ML Challenge 2026 Submission Validation Report [{status}] ===",
+            f"Matching Results Rows: {self.matching_rows} (Expected: {self.expected_s1_count})",
+            f"Candidate Pairs Rows:  {self.candidate_rows}",
+            f"Singleton (Empty) Matches: {self.empty_matches_count}",
         ]
+        if self.matches_not_in_candidates_count > 0:
+            lines.append(f"Matches Not In Candidate Pairs: {self.matches_not_in_candidates_count}")
         if self.errors:
             lines.append("Errors:")
             for err in self.errors:
@@ -44,108 +48,181 @@ class SubmissionValidationReport:
         return "\n".join(lines)
 
 
-def validate_submission_file(
-    submission_path: Union[str, Path],
-    test_df_or_path: Union[str, Path, pd.DataFrame],
-    id_col: str = "sample_id",
-    target_col: str = "prediction",
-    allow_zeros: bool = False,
-) -> SubmissionValidationReport:
-    """Validate submission CSV against test set for row count, ordering, and value validity."""
-    report = SubmissionValidationReport()
+def read_s1_ids_from_source(source1_path: str) -> Set[str]:
+    """Read first column entity IDs from test_source1.tsv."""
+    with open(source1_path, encoding="utf-8") as f:
+        next(f, None)  # skip header
+        return {line.split(DELIM, 1)[0].strip() for line in f if line.strip()}
 
-    # Load submission
-    sub_path = Path(submission_path)
-    if not sub_path.exists():
-        report.is_valid = False
-        report.errors.append(f"Submission file not found: {sub_path}")
-        return report
 
-    try:
-        sub_df = pd.read_csv(sub_path)
-    except Exception as e:
-        report.is_valid = False
-        report.errors.append(f"Could not read submission CSV: {e}")
-        return report
+def validate_tsv_file(
+    filepath: str,
+    expected_header: List[str],
+    required_s1_ids: Set[str],
+    col_name: str,
+    errors: List[str],
+) -> Optional[Dict[str, Set[str]]]:
+    """Validate a results TSV file against competition formatting rules."""
+    path = Path(filepath)
+    if not path.is_file():
+        errors.append(f"File not found: {filepath}")
+        return None
 
-    report.row_count = len(sub_df)
-    report.column_names = list(sub_df.columns)
+    mapping: Dict[str, Set[str]] = {}
+    seen = set()
+    dup_rows = set()
+    intra_dupes = set()
+    self_matches = set()
+    wrong_prefix = set()
 
-    # Load test set for reference IDs
-    if isinstance(test_df_or_path, pd.DataFrame):
-        test_df = test_df_or_path
-    else:
-        test_path = Path(test_df_or_path)
-        if not test_path.exists():
-            report.is_valid = False
-            report.errors.append(f"Test reference file not found: {test_path}")
-            return report
-        test_df = pd.read_csv(test_path)
+    with open(filepath, encoding="utf-8") as f:
+        header = f.readline()
+        if not header:
+            errors.append(f"{path.name} is empty.")
+            return None
 
-    report.test_row_count = len(test_df)
-
-    # 1. Check Row Count
-    if report.row_count != report.test_row_count:
-        report.is_valid = False
-        report.errors.append(
-            f"Row count mismatch: submission has {report.row_count} rows, test set has {report.test_row_count}."
-        )
-
-    # 2. Check Required Columns
-    expected_cols = [id_col, target_col]
-    missing_cols = [c for c in expected_cols if c not in sub_df.columns]
-    if missing_cols:
-        report.is_valid = False
-        report.errors.append(f"Missing required submission columns: {missing_cols}")
-        return report
-
-    # 3. Check ID alignment and ordering
-    sub_ids = sub_df[id_col].astype(str).tolist()
-    test_ids = test_df[id_col].astype(str).tolist()
-
-    if set(sub_ids) != set(test_ids):
-        diff_missing = len(set(test_ids) - set(sub_ids))
-        diff_extra = len(set(sub_ids) - set(test_ids))
-        report.is_valid = False
-        report.errors.append(
-            f"ID set mismatch: {diff_missing} test IDs missing, {diff_extra} unexpected extra IDs in submission."
-        )
-    else:
-        # Check exact sequence order
-        if sub_ids != test_ids:
-            report.order_mismatches = 1
-            report.warnings.append(
-                "Submission IDs match test set but are in DIFFERENT ROW ORDER. Sorting submission to match test order is advised."
+        if DELIM not in header and "," in header:
+            errors.append(
+                f"{path.name}: header has no TAB but contains commas. "
+                "Must be TAB-separated (.tsv) using sep='\\t'."
             )
+            return None
 
-    # 4. Numerical Validity
-    preds = pd.to_numeric(sub_df[target_col], errors="coerce").to_numpy(dtype=float)
+        cols = [c.strip().lower() for c in header.rstrip("\n").split(DELIM)]
+        if cols != expected_header:
+            errors.append(
+                f"{path.name}: unexpected header {cols}. Expected {expected_header}."
+            )
+            return None
 
-    nan_count = int(np.isnan(preds).sum())
-    inf_count = int(np.isinf(preds).sum())
-    neg_count = int((preds < 0).sum())
-    zero_count = int((preds == 0).sum())
+        for line_num, line in enumerate(f, start=2):
+            s1, tab, rest = line.partition(DELIM)
+            if not tab:
+                if s1.strip():
+                    errors.append(f"{path.name}: malformed row at line {line_num}: {line.rstrip()!r}")
+                continue
 
-    report.nan_count = nan_count
-    report.inf_count = inf_count
-    report.negative_count = neg_count
-    report.zero_count = zero_count
+            s1 = s1.strip()
+            if s1 in seen:
+                dup_rows.add(s1)
+            seen.add(s1)
 
-    if nan_count > 0:
+            raw_ids = rest.rstrip("\n").split(",") if rest.strip() else []
+            clean_ids = [i.strip() for i in raw_ids if i.strip()]
+
+            if len(clean_ids) != len(set(clean_ids)):
+                intra_dupes.add(s1)
+
+            id_set = set(clean_ids)
+            mapping[s1] = id_set
+
+            for mid in id_set:
+                if mid.startswith("S1-"):
+                    self_matches.add(mid)
+                elif not mid.startswith(("S2-", "S3-")):
+                    wrong_prefix.add(mid)
+
+    if dup_rows:
+        errors.append(f"{path.name}: duplicate source1_entity_id row(s): {len(dup_rows)} found.")
+    if intra_dupes:
+        errors.append(f"{path.name}: duplicate IDs within a {col_name} list: {len(intra_dupes)} found.")
+    if self_matches:
+        errors.append(f"{path.name}: contains Source 1 IDs (self-matches): {len(self_matches)} found.")
+    if wrong_prefix:
+        errors.append(f"{path.name}: contains IDs without S2-/S3- prefix: {len(wrong_prefix)} found.")
+
+    missing_s1 = required_s1_ids - seen
+    if missing_s1:
+        errors.append(f"{path.name}: required test S1 entities missing: {len(missing_s1)} entities missing.")
+
+    extra_s1 = seen - required_s1_ids
+    if extra_s1:
+        errors.append(f"{path.name}: contains S1 IDs not in test set: {len(extra_s1)} unexpected entities.")
+
+    return mapping
+
+
+def validate_submission_package(
+    matching_path: str,
+    candidate_path: Optional[str] = None,
+    test_dir: str = "resources/student_resource/dataset/test",
+    run_official_script: bool = True,
+) -> ERValidationReport:
+    """Run comprehensive validation on both matching_results.tsv and candidate_pairs.tsv."""
+    report = ERValidationReport()
+    source1_file = os.path.join(test_dir, "test_source1.tsv")
+
+    if not os.path.isfile(source1_file):
         report.is_valid = False
-        report.errors.append(f"Submission contains {nan_count} NaN values.")
+        report.errors.append(f"Test source1 file not found at {source1_file}")
+        return report
 
-    if inf_count > 0:
-        report.is_valid = False
-        report.errors.append(f"Submission contains {inf_count} Infinite (Inf / -Inf) values.")
+    required_s1 = read_s1_ids_from_source(source1_file)
+    report.expected_s1_count = len(required_s1)
 
-    if neg_count > 0:
-        report.is_valid = False
-        report.errors.append(f"Submission contains {neg_count} negative predictions.")
+    # 1. Validate matching_results.tsv
+    matched_mapping = validate_tsv_file(
+        matching_path,
+        MATCHING_HEADER,
+        required_s1,
+        "matched_entity_ids",
+        report.errors,
+    )
+    if matched_mapping is not None:
+        report.matching_rows = len(matched_mapping)
+        report.empty_matches_count = sum(1 for m in matched_mapping.values() if len(m) == 0)
 
-    if zero_count > 0 and not allow_zeros:
-        report.warnings.append(
-            f"Submission contains {zero_count} zero predictions. Ensure zero values are valid in this competition."
+    # 2. Validate candidate_pairs.tsv (if provided)
+    candidate_mapping = None
+    if candidate_path and os.path.isfile(candidate_path):
+        candidate_mapping = validate_tsv_file(
+            candidate_path,
+            CANDIDATE_HEADER,
+            required_s1,
+            "candidate_entity_ids",
+            report.errors,
         )
+        if candidate_mapping is not None:
+            report.candidate_rows = len(candidate_mapping)
+            report.empty_candidates_count = sum(1 for c in candidate_mapping.values() if len(c) == 0)
 
+            # Check: Every matched ID must be in candidates
+            if matched_mapping is not None:
+                mismatches = 0
+                for s1_id, m_set in matched_mapping.items():
+                    c_set = candidate_mapping.get(s1_id, set())
+                    extra = m_set - c_set
+                    if extra:
+                        mismatches += 1
+                report.matches_not_in_candidates_count = mismatches
+                if mismatches > 0:
+                    report.warnings.append(
+                        f"{mismatches} S1 entities have matched IDs that were not present in candidate_pairs.tsv."
+                    )
+    elif candidate_path:
+        report.warnings.append(f"candidate_pairs.tsv not found at {candidate_path}")
+
+    # 3. Optional: Run official validator script
+    if run_official_script:
+        official_validator = "resources/student_resource/utils/validate_submission.py"
+        if os.path.isfile(official_validator):
+            cmd = [
+                sys.executable,
+                official_validator,
+                "--matching",
+                matching_path,
+                "--test-dir",
+                test_dir,
+            ]
+            if candidate_path and os.path.isfile(candidate_path):
+                cmd.extend(["--candidate", candidate_path])
+
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                if proc.returncode != 0:
+                    report.errors.append(f"Official validator failed:\n{proc.stdout}\n{proc.stderr}")
+            except Exception as e:
+                report.warnings.append(f"Could not execute official validator script: {e}")
+
+    report.is_valid = len(report.errors) == 0
     return report

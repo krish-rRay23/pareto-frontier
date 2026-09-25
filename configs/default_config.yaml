@@ -1,0 +1,50 @@
+# Amazon ML Challenge 2026 - Master Configuration
+# Entity Resolution across 3 sources optimizing Macro F0.5
+
+dataset:
+  train_dir: "resources/student_resource/dataset/train"
+  test_dir: "resources/student_resource/dataset/test"
+  output_dir: "output"
+
+# Execution mode
+execution:
+  sample_mode: false            # Set True for local rapid iteration, False for full dataset
+  sample_n_s1: 3000             # S1 entity count for sample mode
+  n_splits: 5                   # GroupKFold splits on S1
+  seed: 42
+  n_jobs: -1
+
+# Multi-pass Candidate Generation (Blocking)
+blocking:
+  max_candidates_per_entity: 50 # Configurable candidate ceiling per S1
+  max_bucket_size: 150          # Max matches per index bucket to suppress non-discriminative keys
+  enable_name_exact: true
+  enable_name_legal_stripped: true
+  enable_name_first_two: true
+  enable_addr_num_token: true
+  enable_addr_pair_tokens: true
+  enable_name_prefix_num: true
+
+# Feature Engineering
+features:
+  enable_consensus: true        # S2-S3 cross-source consensus feature engine
+
+# LightGBM Classifier Hyperparameters
+model:
+  n_estimators: 400
+  learning_rate: 0.05
+  max_depth: 6
+  num_leaves: 31
+  min_child_samples: 20
+  subsample: 0.8
+  colsample_bytree: 0.8
+  scale_pos_weight: 1.0
+  early_stopping_rounds: 30
+
+# Precision-Biased Decision Policy
+decision_policy:
+  optimize_on_oof: true         # Empirically search optimal thresholds on OOF
+  match_threshold: 0.65         # Default baseline match threshold
+  singleton_threshold: 0.55     # Default baseline singleton guard
+  score_margin: 0.20            # Relative gap from top candidate
+  max_matches_per_entity: 10

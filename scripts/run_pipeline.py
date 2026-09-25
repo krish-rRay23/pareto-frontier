@@ -1,40 +1,53 @@
-"""Master execution script for training, OOF generation, and submission."""
+"""Master CLI runner for Amazon ML Challenge 2026 Entity Resolution Pipeline."""
 
 import argparse
+import os
 import sys
 from pathlib import Path
-
 import yaml
 from rich.console import Console
 from rich.table import Table
 
-# Add project root to sys.path
+# Ensure project root is on sys.path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.loader import generate_synthetic_catalog_data, load_dataset
-from src.data.validation import validate_dataset_schema
-from src.inference.predict import generate_submission_file
-from src.inference.submission_validator import validate_submission_file
-from src.training.logger import ExperimentLogger
-from src.training.trainer import CrossValidationTrainer
+from src.data.loader import (
+    load_benchmark_subset,
+    load_ground_truth,
+    load_source_tsv,
+)
+from src.inference.pipeline import EntityResolutionPipeline
+from src.inference.submission_validator import validate_submission_package
 
 console = Console()
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run ML Competition Pipeline")
+    parser = argparse.ArgumentParser(description="Amazon ML Challenge 2026 - Entity Resolution")
     parser.add_argument(
         "--config",
         type=str,
-        default=str(PROJECT_ROOT / "configs" / "baseline_ridge.yaml"),
-        help="Path to YAML config file",
+        default=str(PROJECT_ROOT / "configs" / "default_config.yaml"),
+        help="Path to YAML configuration file",
     )
     parser.add_argument(
-        "--synthetic",
+        "--sample",
         action="store_true",
-        help="Run pipeline on synthetic catalog data for offline verification",
+        help="Run in rapid subsample mode for local CPU/GPU iteration",
+    )
+    parser.add_argument(
+        "--n-s1",
+        type=int,
+        default=None,
+        help="Override number of S1 entities to load in sample mode",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Directory to write matching_results.tsv and candidate_pairs.tsv",
     )
     return parser.parse_args()
 
@@ -46,117 +59,131 @@ def main():
         config_path = PROJECT_ROOT / config_path
 
     if not config_path.exists():
-        console.print(f"[red]Config file not found: {config_path}[/red]")
+        console.print(f"[red]Configuration file not found: {config_path}[/red]")
         sys.exit(1)
 
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    exp_id = config.get("experiment", {}).get("id", "experiment")
-    seed = config.get("experiment", {}).get("seed", 42)
-    notes = config.get("experiment", {}).get("notes", "")
+    # CLI overrides
+    sample_mode = args.sample or config.get("execution", {}).get("sample_mode", False)
+    n_s1 = args.n_s1 or config.get("execution", {}).get("sample_n_s1", 2000)
+    output_dir = args.output_dir or config.get("dataset", {}).get("output_dir", "output")
+    output_dir = str(PROJECT_ROOT / output_dir) if not Path(output_dir).is_absolute() else output_dir
 
-    console.print(f"[bold cyan]=== Pareto-Frontier: Starting {exp_id} ===[/bold cyan]")
+    train_dir = str(PROJECT_ROOT / config.get("dataset", {}).get("train_dir", "resources/student_resource/dataset/train"))
+    test_dir = str(PROJECT_ROOT / config.get("dataset", {}).get("test_dir", "resources/student_resource/dataset/test"))
 
-    data_cfg = config.get("data", {})
-    id_col = data_cfg.get("id_col", "sample_id")
-    target_col = data_cfg.get("target_col", "target_price")
-    group_col = data_cfg.get("group_col", "category")
-    allow_zeros = data_cfg.get("allow_zero_target", False)
+    console.print("[bold cyan]================================================================[/bold cyan]")
+    console.print("[bold cyan]       AMAZON ML CHALLENGE 2026 - ENTITY RESOLUTION PIPELINE    [/bold cyan]")
+    console.print("[bold cyan]================================================================[/bold cyan]")
+    console.print(f"[dim]Mode: {'SUBSAMPLE BENCHMARK' if sample_mode else 'FULL INDUSTRIAL SCALE'} | S1 Target: {n_s1 if sample_mode else 'ALL'}[/dim]")
+    console.print(f"[dim]Train Dir:  {train_dir}[/dim]")
+    console.print(f"[dim]Test Dir:   {test_dir}[/dim]")
+    console.print(f"[dim]Output Dir: {output_dir}[/dim]\n")
 
     # 1. Load Data
-    train_path = PROJECT_ROOT / data_cfg.get("train_path", "data/raw/train.csv")
-    test_path = PROJECT_ROOT / data_cfg.get("test_path", "data/raw/test.csv")
-
-    if args.synthetic or not train_path.exists() or not test_path.exists():
-        console.print("[yellow]Using generated synthetic catalog data for verification.[/yellow]")
-        train_df = generate_synthetic_catalog_data(n_samples=400, seed=seed, is_test=False)
-        test_df = generate_synthetic_catalog_data(n_samples=100, seed=seed + 1, is_test=True)
+    console.print("[bold yellow]>>> Step 1: Loading Training Data & Ground Truth...[/bold yellow]")
+    if sample_mode:
+        s1_records, target_records, ground_truth = load_benchmark_subset(
+            data_dir=train_dir,
+            n_s1=n_s1,
+            background_noise_ratio=25,
+        )
     else:
-        console.print(f"[green]Loading train data from {train_path}[/green]")
-        train_df = load_dataset(train_path)
-        console.print(f"[green]Loading test data from {test_path}[/green]")
-        test_df = load_dataset(test_path)
+        s1_records = load_source_tsv(os.path.join(train_dir, "train_source1.tsv"))
+        s2_records = load_source_tsv(os.path.join(train_dir, "train_source2.tsv"))
+        s3_records = load_source_tsv(os.path.join(train_dir, "train_source3.tsv"))
+        target_records = s2_records + s3_records
+        ground_truth = load_ground_truth(os.path.join(train_dir, "train_ground_truth.tsv"))
 
-    # 2. Validate Data Schema
-    val_report = validate_dataset_schema(
-        train_df,
-        required_columns=[id_col, target_col],
-        id_column=id_col,
-        target_column=target_col,
-        allow_zero_target=allow_zeros,
-    )
-    if not val_report.is_valid:
-        console.print(f"[red]Train data schema validation failed:\n{val_report.summary()}[/red]")
-        sys.exit(1)
+    console.print(f"[green]Loaded {len(s1_records):,} S1 records, {len(target_records):,} target pool records, {len(ground_truth):,} ground truth entries.[/green]\n")
 
-    console.print(f"[dim]{val_report.summary()}[/dim]")
+    # 2. Build Pipeline
+    console.print("[bold yellow]>>> Step 2: Initializing Pipeline & Blocker...[/bold yellow]")
+    block_cfg = config.get("blocking", {})
+    model_cfg = config.get("model", {})
+    feat_cfg = config.get("features", {})
+    dec_cfg = config.get("decision_policy", {})
 
-    # 3. Cross Validation Training
-    trainer = CrossValidationTrainer(config=config, experiment_id=exp_id)
-    console.print("[cyan]Running cross-validation folds...[/cyan]")
-    cv_metrics = trainer.run_cv(
-        train_df=train_df,
-        target_col=target_col,
-        id_col=id_col,
-        group_col=group_col,
+    pipeline = EntityResolutionPipeline(
+        max_candidates_per_entity=block_cfg.get("max_candidates_per_entity", 50),
+        enable_consensus_features=feat_cfg.get("enable_consensus", True),
+        lgb_params=model_cfg,
     )
 
-    # Display Metrics Table
-    table = Table(title=f"Cross Validation Results: {exp_id}")
-    table.add_column("Metric", style="cyan")
-    table.add_column("Value", style="green bold")
-    table.add_row("SMAPE", f"{cv_metrics['smape']:.4f}%")
-    table.add_row("MAE", f"{cv_metrics['mae']:.4f}")
-    table.add_row("RMSE", f"{cv_metrics['rmse']:.4f}")
+    # 3. Fit and Validate
+    console.print("[bold yellow]>>> Step 3: Executing Blocking, Features, GroupKFold, and OOF Decision Optimization...[/bold yellow]")
+    n_splits = config.get("execution", {}).get("n_splits", 5)
+    metrics = pipeline.fit_and_validate(
+        s1_records=s1_records,
+        target_records=target_records,
+        ground_truth=ground_truth,
+        n_splits=n_splits,
+        optimize_policy=dec_cfg.get("optimize_on_oof", True),
+        verbose=True,
+    )
+
+    # Display Metrics Summary Table
+    table = Table(title="Out-of-Fold Validation Summary (Official Macro F0.5)")
+    table.add_column("Evaluation Metric", style="cyan")
+    table.add_column("Score / Count", style="green bold")
+
+    table.add_row("Macro F0.5 (Official Scored)", f"{metrics['macro_f05']:.4f}")
+    table.add_row("Macro Precision", f"{metrics['macro_precision']:.4f}")
+    table.add_row("Macro Recall", f"{metrics['macro_recall']:.4f}")
+    table.add_row("Singleton Accuracy", f"{metrics['singleton_accuracy']:.4f}")
+    table.add_row("Candidate Recall (Blocking)", f"{metrics['candidate_recall']*100:.2f}%")
+    table.add_row("Avg Candidates per S1", f"{metrics['avg_candidates_per_s1']:.2f}")
+    table.add_row("False Merges (Penalized FP)", f"{metrics['false_merges']:,}")
     console.print(table)
+    console.print()
 
-    # 4. Generate Test Predictions
-    console.print("[cyan]Generating test set predictions...[/cyan]")
-    test_preds = trainer.predict_test(test_df)
+    # 4. Test Inference (Optional in sample mode, standard on full test)
+    console.print("[bold yellow]>>> Step 4: Test Inference & Official Submission Validation...[/bold yellow]")
+    test_s1_file = os.path.join(test_dir, "test_source1.tsv")
+    test_s2_file = os.path.join(test_dir, "test_source2.tsv")
+    test_s3_file = os.path.join(test_dir, "test_source3.tsv")
 
-    out_cfg = config.get("output", {})
-    sub_dir = PROJECT_ROOT / out_cfg.get("submission_dir", "artifacts/submissions")
-    sub_file = out_cfg.get("submission_filename", f"{exp_id}_sub.csv")
-    sub_target_col = out_cfg.get("target_name_in_sub", "prediction")
-    sub_path = sub_dir / sub_file
+    if os.path.isfile(test_s1_file) and os.path.isfile(test_s2_file) and os.path.isfile(test_s3_file):
+        console.print("[cyan]Loading test records from dataset/test...[/cyan]")
+        if sample_mode:
+            # In sample mode, run inference on first 100 test S1 records for smoke verification
+            console.print("[yellow]Running smoke inference on first 100 test entities...[/yellow]")
+            test_s1 = load_source_tsv(test_s1_file, max_rows=100)
+            test_s2 = load_source_tsv(test_s2_file, max_rows=2000)
+            test_s3 = load_source_tsv(test_s3_file, max_rows=2000)
+            test_targets = test_s2 + test_s3
+            # In sample mode, skip full test row count validator
+            matching_path, candidate_path = pipeline.predict_test_and_export(
+                test_s1_records=test_s1,
+                test_target_records=test_targets,
+                output_dir=output_dir,
+                test_dir=test_dir,
+                validate=True,
+                verbose=True,
+            )
+            console.print(f"[bold green]Smoke test submission generated successfully:[/bold green]")
+            console.print(f"  - Matching Results: {matching_path}")
+            console.print(f"  - Candidate Pairs:  {candidate_path}")
+        else:
+            test_s1 = load_source_tsv(test_s1_file)
+            test_s2 = load_source_tsv(test_s2_file)
+            test_s3 = load_source_tsv(test_s3_file)
+            test_targets = test_s2 + test_s3
+            matching_path, candidate_path = pipeline.predict_test_and_export(
+                test_s1_records=test_s1,
+                test_target_records=test_targets,
+                output_dir=output_dir,
+                test_dir=test_dir,
+                validate=True,
+                verbose=True,
+            )
+            console.print(f"[bold green]Official submission files successfully validated and ready for upload![/bold green]")
+    else:
+        console.print("[yellow]Test directory files not found, skipping test inference step.[/yellow]")
 
-    generate_submission_file(
-        test_df=test_df,
-        predictions=test_preds,
-        output_path=sub_path,
-        id_col=id_col,
-        target_col=sub_target_col,
-    )
-    console.print(f"[green]Submission written to: {sub_path}[/green]")
-
-    # 5. Validate Submission
-    sub_report = validate_submission_file(
-        submission_path=sub_path,
-        test_df_or_path=test_df,
-        id_col=id_col,
-        target_col=sub_target_col,
-        allow_zeros=allow_zeros,
-    )
-    if not sub_report.is_valid:
-        console.print(f"[red]Submission validation FAILED:\n{sub_report.summary()}[/red]")
-        sys.exit(1)
-    console.print(f"[bold green]Submission Verified:\n{sub_report.summary()}[/bold green]")
-
-    # 6. Log Experiment
-    logger = ExperimentLogger()
-    cv_strategy = config.get("validation", {}).get("strategy", "stratified")
-    n_splits = config.get("validation", {}).get("n_splits", 5)
-    logger.log(
-        experiment_id=exp_id,
-        config=config,
-        metrics=cv_metrics,
-        cv_method=f"{n_splits}-Fold {cv_strategy}",
-        seed=seed,
-        notes=notes,
-        submission_file=str(sub_path),
-    )
-    console.print("[bold green]Pipeline finished successfully and experiment logged.[/bold green]")
+    console.print("\n[bold green]Pipeline run complete.[/bold green]")
 
 
 if __name__ == "__main__":

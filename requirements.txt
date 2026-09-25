@@ -8,7 +8,7 @@ tqdm>=4.65.0
 rich>=13.0.0
 
 # Optional tree models & accelerators (installable for competitions)
-# lightgbm>=4.0.0
+lightgbm>=4.0.0
 # catboost>=1.2.0
 # xgboost>=2.0.0
 

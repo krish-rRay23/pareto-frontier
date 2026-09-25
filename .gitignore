@@ -47,6 +47,9 @@ data/interim/*
 !data/interim/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
+resources/**/dataset/
+resources/student_resource/dataset/
+*.tsv
 
 # Heavy weights & checkpoints
 artifacts/models/*
@@ -60,6 +63,10 @@ artifacts/oof/*
 
 # Notebook checkpoints
 .ipynb_checkpoints
+
+# Benchmark and run outputs
+catboost_info/
+output/
 
 # Pytest / Coverage / Linter caches
 .pytest_cache/

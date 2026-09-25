@@ -1,86 +1,71 @@
-"""Unit tests for submission integrity verification."""
+"""Unit tests for submission validator."""
 
-import numpy as np
-import pandas as pd
 import pytest
+from src.inference.submission_validator import (
+    validate_tsv_file,
+    MATCHING_HEADER,
+    CANDIDATE_HEADER,
+)
 
-from src.inference.submission_validator import validate_submission_file
 
-
-@pytest.fixture
-def test_data(tmp_path):
-    test_df = pd.DataFrame(
-        {
-            "sample_id": ["S1", "S2", "S3", "S4", "S5"],
-            "catalog_title": ["A", "B", "C", "D", "E"],
-        }
+def test_validate_valid_matching_tsv(tmp_path):
+    """Valid matching TSV must parse without errors."""
+    tsv_content = (
+        "source1_entity_id\tmatched_entity_ids\n"
+        "S1-001\tS2-10,S3-20\n"
+        "S1-002\t\n"
     )
-    test_csv = tmp_path / "test.csv"
-    test_df.to_csv(test_csv, index=False)
-    return test_csv, test_df
+    p = tmp_path / "matching_results.tsv"
+    p.write_text(tsv_content, encoding="utf-8")
 
-
-def test_submission_valid(tmp_path, test_data):
-    test_csv, test_df = test_data
-    sub_df = pd.DataFrame(
-        {
-            "sample_id": ["S1", "S2", "S3", "S4", "S5"],
-            "prediction": [10.5, 20.2, 30.1, 40.0, 50.9],
-        }
+    errors = []
+    mapping = validate_tsv_file(
+        str(p),
+        MATCHING_HEADER,
+        required_s1_ids={"S1-001", "S1-002"},
+        col_name="matched_entity_ids",
+        errors=errors,
     )
-    sub_csv = tmp_path / "sub_valid.csv"
-    sub_df.to_csv(sub_csv, index=False)
-
-    report = validate_submission_file(sub_csv, test_df)
-    assert report.is_valid
-    assert len(report.errors) == 0
+    assert len(errors) == 0
+    assert mapping["S1-001"] == {"S2-10", "S3-20"}
+    assert mapping["S1-002"] == set()
 
 
-def test_submission_row_count_mismatch(tmp_path, test_data):
-    test_csv, test_df = test_data
-    sub_df = pd.DataFrame(
-        {
-            "sample_id": ["S1", "S2"],
-            "prediction": [10.5, 20.2],
-        }
+def test_reject_self_match(tmp_path):
+    """Self-match (S1 matching S1) must be rejected."""
+    tsv_content = (
+        "source1_entity_id\tmatched_entity_ids\n"
+        "S1-001\tS1-002\n"
     )
-    sub_csv = tmp_path / "sub_short.csv"
-    sub_df.to_csv(sub_csv, index=False)
+    p = tmp_path / "matching_results.tsv"
+    p.write_text(tsv_content, encoding="utf-8")
 
-    report = validate_submission_file(sub_csv, test_df)
-    assert not report.is_valid
-    assert any("Row count mismatch" in e for e in report.errors)
-
-
-def test_submission_nan_and_negative(tmp_path, test_data):
-    test_csv, test_df = test_data
-    sub_df = pd.DataFrame(
-        {
-            "sample_id": ["S1", "S2", "S3", "S4", "S5"],
-            "prediction": [10.5, np.nan, -5.0, np.inf, 20.0],
-        }
+    errors = []
+    validate_tsv_file(
+        str(p),
+        MATCHING_HEADER,
+        required_s1_ids={"S1-001"},
+        col_name="matched_entity_ids",
+        errors=errors,
     )
-    sub_csv = tmp_path / "sub_invalid_nums.csv"
-    sub_df.to_csv(sub_csv, index=False)
-
-    report = validate_submission_file(sub_csv, test_df)
-    assert not report.is_valid
-    assert report.nan_count == 1
-    assert report.negative_count == 1
-    assert report.inf_count == 1
+    assert any("self-matches" in e for e in errors)
 
 
-def test_submission_id_order_warning(tmp_path, test_data):
-    test_csv, test_df = test_data
-    sub_df = pd.DataFrame(
-        {
-            "sample_id": ["S5", "S4", "S3", "S2", "S1"],
-            "prediction": [10.0, 20.0, 30.0, 40.0, 50.0],
-        }
+def test_reject_csv_instead_of_tsv(tmp_path):
+    """Comma separated file instead of TSV must be rejected."""
+    csv_content = (
+        "source1_entity_id,matched_entity_ids\n"
+        "S1-001,S2-10\n"
     )
-    sub_csv = tmp_path / "sub_reordered.csv"
-    sub_df.to_csv(sub_csv, index=False)
+    p = tmp_path / "matching_results.csv"
+    p.write_text(csv_content, encoding="utf-8")
 
-    report = validate_submission_file(sub_csv, test_df)
-    assert report.is_valid  # Still valid set of IDs
-    assert report.order_mismatches == 1  # But flagged with order warning
+    errors = []
+    validate_tsv_file(
+        str(p),
+        MATCHING_HEADER,
+        required_s1_ids={"S1-001"},
+        col_name="matched_entity_ids",
+        errors=errors,
+    )
+    assert any("header has no TAB" in e for e in errors)

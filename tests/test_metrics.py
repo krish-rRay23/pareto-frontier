@@ -1,47 +1,77 @@
-"""Unit tests for validation metrics and SMAPE edge cases."""
+"""Unit tests for ML Challenge 2026 Macro-Averaged F0.5 metric."""
 
-import numpy as np
 import pytest
-
-from src.validation.metrics import compute_all_metrics, compute_smape
-
-
-def test_smape_identical():
-    """SMAPE should be exactly 0% when predictions match ground truth."""
-    y = np.array([10.0, 50.0, 100.0, 500.0])
-    assert compute_smape(y, y) == pytest.approx(0.0, abs=1e-6)
+from src.validation.metrics import (
+    compute_f_beta,
+    compute_entity_f05,
+    compute_macro_f05,
+)
 
 
-def test_smape_zero_pairs():
-    """When both ground truth and prediction are 0, error must be 0.0 without division by zero."""
-    y_true = np.array([0.0, 0.0, 100.0])
-    y_pred = np.array([0.0, 0.0, 100.0])
-    assert compute_smape(y_true, y_pred) == pytest.approx(0.0, abs=1e-6)
+def test_f05_official_example():
+    """Verify official problem statement example:
+    Predicted: [S2-00047, S2-00193, S3-00812]
+    True:      [S2-00047, S3-00812]
+    Precision = 2/3, Recall = 1.0 -> F0.5 = 0.7142857...
+    """
+    true_set = {"S2-00047", "S3-00812"}
+    pred_set = {"S2-00047", "S2-00193", "S3-00812"}
+    res = compute_entity_f05(true_set, pred_set)
+
+    assert res["precision"] == pytest.approx(2.0 / 3.0, abs=1e-5)
+    assert res["recall"] == pytest.approx(1.0, abs=1e-5)
+    assert res["f05"] == pytest.approx(0.7142857, abs=1e-5)
 
 
-def test_smape_known_values():
-    """Validate hand-calculated SMAPE values."""
-    # y_true=100, y_pred=200 -> 2*|200-100|/(100+200) = 200/300 = 66.6667%
-    y_t = [100.0]
-    y_p = [200.0]
-    expected = (200.0 / 300.0) * 100.0
-    assert compute_smape(y_t, y_p) == pytest.approx(expected, rel=1e-4)
+def test_singleton_correct():
+    """Singleton correctly predicted as empty list must score 1.0."""
+    res = compute_entity_f05(set(), set())
+    assert res["f05"] == 1.0
+    assert res["fp"] == 0
 
 
-def test_smape_shape_mismatch():
-    """Ensure shape mismatch raises ValueError."""
-    with pytest.raises(ValueError):
-        compute_smape([1.0, 2.0], [1.0])
+def test_singleton_false_merge():
+    """Singleton predicted with a false candidate must score 0.0."""
+    res = compute_entity_f05(set(), {"S2-99999"})
+    assert res["f05"] == 0.0
+    assert res["fp"] == 1
 
 
-def test_compute_all_metrics():
-    """Ensure compute_all_metrics returns correct keys and valid numbers."""
-    y_true = np.array([10.0, 20.0, 30.0])
-    y_pred = np.array([12.0, 18.0, 30.0])
-    metrics = compute_all_metrics(y_true, y_pred)
+def test_perfect_prediction():
+    """Perfect match must score 1.0."""
+    true_set = {"S2-1", "S3-2"}
+    pred_set = {"S2-1", "S3-2"}
+    res = compute_entity_f05(true_set, pred_set)
+    assert res["f05"] == 1.0
+    assert res["precision"] == 1.0
+    assert res["recall"] == 1.0
 
-    assert "smape" in metrics
-    assert "mae" in metrics
-    assert "rmse" in metrics
-    assert metrics["mae"] == pytest.approx(4.0 / 3.0, abs=1e-4)
-    assert metrics["rmse"] == pytest.approx(np.sqrt(8.0 / 3.0), abs=1e-4)
+
+def test_macro_f05_average():
+    """Verify macro average across mixed entities (singletons and multi-matches)."""
+    gt = {
+        "S1-1": {"S2-10", "S3-20"},  # Perfect -> 1.0
+        "S1-2": set(),               # Correct singleton -> 1.0
+        "S1-3": set(),               # Failed singleton (FP) -> 0.0
+        "S1-4": {"S2-30"},           # Missed match (FN) -> 0.0
+    }
+    preds = {
+        "S1-1": {"S2-10", "S3-20"},
+        "S1-2": set(),
+        "S1-3": {"S2-99"},
+        "S1-4": set(),
+    }
+    meta = {
+        "S1-1": {"country": "US"},
+        "S1-2": {"country": "US"},
+        "S1-3": {"country": "India"},
+        "S1-4": {"country": "India"},
+    }
+    summary = compute_macro_f05(gt, preds, metadata=meta)
+
+    # Average: (1.0 + 1.0 + 0.0 + 0.0) / 4 = 0.50
+    assert summary["macro_f05"] == pytest.approx(0.50, abs=1e-5)
+    assert summary["macro_f05_us"] == pytest.approx(1.0, abs=1e-5)
+    assert summary["macro_f05_india"] == pytest.approx(0.0, abs=1e-5)
+    assert summary["singleton_accuracy"] == pytest.approx(0.50, abs=1e-5)
+    assert summary["false_merges"] == 1
