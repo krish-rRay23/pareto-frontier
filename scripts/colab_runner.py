@@ -41,6 +41,7 @@ from src.inference.decision_policy import (
     ContradictionChecker,
     ExpectedF05DecisionDecoder,
     PrecisionDecisionPolicy,
+    SourcePartitionConstraint,
     TargetExclusivityResolver,
     optimize_decision_policy,
 )
@@ -421,6 +422,7 @@ def run_resumable_inference(
 
     exclusivity_resolver = TargetExclusivityResolver()
     contradiction_checker = ContradictionChecker()
+    source_partition = SourcePartitionConstraint()
 
     t_start = time.time()
 
@@ -487,6 +489,7 @@ def run_resumable_inference(
 
             chunk_s1_ids = list(s1_chunk_dict.keys())
             matches_dict = policy.apply(chunk_pairs, cal_scores, all_s1_ids=chunk_s1_ids)
+            matches_dict = source_partition.apply(matches_dict, chunk_pairs, cal_scores, target_dict=chunk_target_dict)
             matches_dict = exclusivity_resolver.resolve(matches_dict, chunk_pairs, cal_scores)
             matches_dict = contradiction_checker.filter_predictions(matches_dict, s1_chunk_pre, tgt_pre)
 

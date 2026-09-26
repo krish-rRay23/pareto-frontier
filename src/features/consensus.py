@@ -23,11 +23,12 @@ def compute_s2_s3_consensus(
     s1_to_s3: Dict[str, List[str]] = {}
 
     for sid, tid in pairs:
-        if tid.startswith("S2-"):
+        u = tid.upper()
+        if u.startswith(("S2-", "S2_", "S2")):
             if sid not in s1_to_s2:
                 s1_to_s2[sid] = []
             s1_to_s2[sid].append(tid)
-        elif tid.startswith("S3-"):
+        elif u.startswith(("S3-", "S3_", "S3")):
             if sid not in s1_to_s3:
                 s1_to_s3[sid] = []
             s1_to_s3[sid].append(tid)
@@ -37,7 +38,7 @@ def compute_s2_s3_consensus(
     peer_max_num_match = []
 
     for sid, tid in pairs:
-        is_s2 = tid.startswith("S2-")
+        is_s2 = tid.upper().startswith(("S2-", "S2_", "S2"))
         peer_tids = s1_to_s3.get(sid, []) if is_s2 else s1_to_s2.get(sid, [])
 
         if not peer_tids or tid not in precomputed_targets:

@@ -210,6 +210,61 @@ class TargetExclusivityResolver:
         return final_preds
 
 
+class SourcePartitionConstraint:
+    """Enforces structural domain constraint: an S1 entity can match at most
+    ONE entity from Source 2 and at most ONE entity from Source 3.
+    """
+
+    def apply(
+        self,
+        predictions: Dict[str, Set[str]],
+        pairs: List[Tuple[str, str]],
+        scores: np.ndarray,
+        target_dict: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> Dict[str, Set[str]]:
+        pair_scores = {p: float(s) for p, s in zip(pairs, scores)}
+        filtered_preds: Dict[str, Set[str]] = {}
+
+        def _is_s2(tid: str) -> bool:
+            if target_dict and tid in target_dict:
+                src = str(target_dict[tid].get("src") or target_dict[tid].get("source") or "").upper()
+                if src in ("S2", "SOURCE2"):
+                    return True
+            u = tid.upper()
+            return u.startswith(("S2-", "S2_", "S2", "SOURCE2"))
+
+        def _is_s3(tid: str) -> bool:
+            if target_dict and tid in target_dict:
+                src = str(target_dict[tid].get("src") or target_dict[tid].get("source") or "").upper()
+                if src in ("S3", "SOURCE3"):
+                    return True
+            u = tid.upper()
+            return u.startswith(("S3-", "S3_", "S3", "SOURCE3"))
+
+        for sid, t_set in predictions.items():
+            if len(t_set) <= 1:
+                filtered_preds[sid] = t_set
+                continue
+
+            s2_cands = [(tid, pair_scores.get((sid, tid), 0.5)) for tid in t_set if _is_s2(tid)]
+            s3_cands = [(tid, pair_scores.get((sid, tid), 0.5)) for tid in t_set if _is_s3(tid)]
+            other_cands = [(tid, pair_scores.get((sid, tid), 0.5)) for tid in t_set if not _is_s2(tid) and not _is_s3(tid)]
+
+            best_set = set()
+            if s2_cands:
+                s2_cands.sort(key=lambda x: x[1], reverse=True)
+                best_set.add(s2_cands[0][0])
+            if s3_cands:
+                s3_cands.sort(key=lambda x: x[1], reverse=True)
+                best_set.add(s3_cands[0][0])
+            for tid, _ in other_cands[:1]:
+                best_set.add(tid)
+
+            filtered_preds[sid] = best_set
+
+        return filtered_preds
+
+
 class ContradictionChecker:
     """Conservative safety checks against obvious geographical or numeric contradictions."""
 

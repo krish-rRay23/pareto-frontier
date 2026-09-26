@@ -23,6 +23,7 @@ from src.normalization.text_normalizer import get_multi_view_name
 try:
     import rapidfuzz.distance.JaroWinkler as rf_jw
     import rapidfuzz.distance.Levenshtein as rf_lev
+    import rapidfuzz.fuzz as rf_fuzz
     HAS_RAPIDFUZZ = True
 except ImportError:
     HAS_RAPIDFUZZ = False
@@ -147,6 +148,14 @@ def containment_ratio(set_a: Any, set_b: Any) -> float:
 
 def token_sort_ratio(tokens_a: List[str], tokens_b: List[str]) -> float:
     """Compute similarity of alphabetically sorted token strings."""
+    if not tokens_a and not tokens_b:
+        return 1.0
+    if not tokens_a or not tokens_b:
+        return 0.0
+    if HAS_RAPIDFUZZ:
+        str_a = " ".join(tokens_a)
+        str_b = " ".join(tokens_b)
+        return float(rf_fuzz.token_sort_ratio(str_a, str_b) / 100.0)
     sorted_a = " ".join(sorted(tokens_a))
     sorted_b = " ".join(sorted(tokens_b))
     return sequence_match_ratio(sorted_a, sorted_b)
@@ -154,6 +163,14 @@ def token_sort_ratio(tokens_a: List[str], tokens_b: List[str]) -> float:
 
 def token_set_ratio(tokens_a: List[str], tokens_b: List[str]) -> float:
     """Compute token set similarity comparing common vs remainder tokens."""
+    if not tokens_a and not tokens_b:
+        return 1.0
+    if not tokens_a or not tokens_b:
+        return 0.0
+    if HAS_RAPIDFUZZ:
+        str_a = " ".join(tokens_a)
+        str_b = " ".join(tokens_b)
+        return float(rf_fuzz.token_set_ratio(str_a, str_b) / 100.0)
     set_a = set(tokens_a)
     set_b = set(tokens_b)
     intersection = set_a & set_b
