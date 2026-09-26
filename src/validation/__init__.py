@@ -1,12 +1,19 @@
 """Validation module exports."""
 
-from src.validation.metrics import compute_entity_f05, compute_f_beta, compute_macro_f05
-from src.validation.splitters import get_cv_splitter, get_folds_list
+from src.validation.metrics import (
+    compute_macro_f05,
+    compute_entity_f05,
+    compute_f_beta,
+    compute_all_metrics,
+)
+from src.validation.splitters import GroupKFoldByS1
+from src.validation.stress_tests import run_error_slice_audit
 
 __all__ = [
-    "compute_f_beta",
-    "compute_entity_f05",
     "compute_macro_f05",
-    "get_cv_splitter",
-    "get_folds_list",
+    "compute_entity_f05",
+    "compute_f_beta",
+    "compute_all_metrics",
+    "GroupKFoldByS1",
+    "run_error_slice_audit",
 ]

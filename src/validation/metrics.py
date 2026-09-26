@@ -11,7 +11,7 @@ Evaluation rules:
   If predicted list is empty or tp == 0, score is 0.0.
 """
 
-from typing import Dict, List, Set, Union, Optional
+from typing import Any, Dict, List, Set, Union, Optional
 import numpy as np
 import pandas as pd
 
@@ -189,4 +189,13 @@ def compute_macro_f05(
         summary[f"count_{b}"] = len(b_scores)
 
     return summary
+
+
+def compute_all_metrics(y_true: Any, y_pred: Any) -> Dict[str, float]:
+    """General metric evaluation function for entity resolution and pairwise scores."""
+    if isinstance(y_true, dict) and isinstance(y_pred, dict):
+        return compute_macro_f05(y_pred, y_true)
+    y_t = np.asarray(y_true, dtype=float)
+    y_p = np.asarray(y_pred, dtype=float)
+    return {"mae": float(np.mean(np.abs(y_t - y_p)))}
 

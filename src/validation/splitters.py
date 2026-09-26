@@ -41,6 +41,18 @@ def get_entity_splits(
         return list(kf.split(indices))
 
 
+class GroupKFoldByS1:
+    """Convenience class for entity-disjoint S1 splitting."""
+
+    def __init__(self, n_splits: int = 5, shuffle: bool = True, seed: int = 42):
+        self.n_splits = n_splits
+        self.shuffle = shuffle
+        self.seed = seed
+
+    def split(self, entity_ids: List[str], stratify_labels: Optional[List[str]] = None):
+        return get_entity_splits(entity_ids, stratify_labels, self.n_splits, self.shuffle, self.seed)
+
+
 def get_cv_splitter(
     strategy: str = "group",
     n_splits: int = 5,

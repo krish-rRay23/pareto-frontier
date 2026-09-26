@@ -1,4 +1,4 @@
-"""Address normalization and entity resolution token extractor."""
+"""Address normalization and multi-view token extractor."""
 
 import re
 from typing import Dict, List, Set
@@ -6,6 +6,7 @@ from src.normalization.text_normalizer import strip_accents, clean_basic
 
 
 STREET_ABBREVIATIONS: Dict[str, str] = {
+    # English
     "rd": "road",
     "st": "street",
     "dr": "drive",
@@ -24,22 +25,14 @@ STREET_ABBREVIATIONS: Dict[str, str] = {
     "pl": "place",
     "sq": "square",
     "ter": "terrace",
-}
-
-US_STATE_CODES: Dict[str, str] = {
-    "al": "alabama", "ak": "alaska", "az": "arizona", "ar": "arkansas",
-    "ca": "california", "co": "colorado", "ct": "connecticut", "de": "delaware",
-    "fl": "florida", "ga": "georgia", "hi": "hawaii", "id": "idaho",
-    "il": "illinois", "in": "indiana", "ia": "iowa", "ks": "kansas",
-    "ky": "kentucky", "la": "louisiana", "me": "maine", "md": "maryland",
-    "ma": "massachusetts", "mi": "michigan", "mn": "minnesota", "ms": "mississippi",
-    "mo": "missouri", "mt": "montana", "ne": "nebraska", "nv": "nevada",
-    "nh": "new hampshire", "nj": "new jersey", "nm": "new mexico", "ny": "new york",
-    "nc": "north carolina", "nd": "north dakota", "oh": "ohio", "ok": "oklahoma",
-    "or": "oregon", "pa": "pennsylvania", "ri": "rhode island", "sc": "south carolina",
-    "sd": "south dakota", "tn": "tennessee", "tx": "texas", "ut": "utah",
-    "vt": "vermont", "va": "virginia", "wa": "washington", "wv": "west virginia",
-    "wi": "wisconsin", "wy": "wyoming", "dc": "district of columbia",
+    # French
+    "r": "rue",
+    "av": "avenue",
+    "bd": "boulevard",
+    "imp": "impasse",
+    "all": "allee",
+    "pl": "place",
+    "chem": "chemin",
 }
 
 ADDR_STOPWORDS: Set[str] = {
@@ -48,23 +41,26 @@ ADDR_STOPWORDS: Set[str] = {
     "fl", "floor", "ste", "suite", "apt", "apartment", "unit", "po", "box",
     "near", "opp", "opposite", "behind", "beside", "block", "sector", "plot",
     "no", "h", "city", "state", "road", "west", "east", "north", "south",
+    # French stopwords
+    "rue", "boulevard", "avenue", "impasse", "allee", "place", "chemin", "batiment",
 }
 
 
 def extract_numbers(text: str) -> List[str]:
-    """Extract all sequences of 1-6 digits with leading zeros stripped (e.g. 0017560 -> 17560)."""
+    """Extract all sequences of 1-7 digits with leading zeros stripped."""
     if not text or not isinstance(text, str):
         return []
     raw_nums = re.findall(r"\b\d{1,7}\b", text)
-    # Normalize by stripping leading zeros so '005559' matches '5559'
     return [n.lstrip("0") or "0" for n in raw_nums]
 
 
 def extract_postal_codes(text: str) -> List[str]:
-    """Extract 5-digit (US ZIP) or 6-digit (India PIN) postal codes."""
+    """Extract 5-digit (US ZIP / France code) or 6-digit (India PIN) postal codes."""
     if not text or not isinstance(text, str):
         return []
-    return re.findall(r"\b[1-9]\d{4,5}\b", text)
+    # US 5-digit / France 5-digit: \b\d{5}\b
+    # India 6-digit PIN: \b[1-9]\d{5}\b
+    return re.findall(r"\b\d{5,6}\b", text)
 
 
 def normalize_address(text: str) -> str:
@@ -86,30 +82,52 @@ def extract_salient_tokens(text: str, min_len: int = 3) -> List[str]:
     return salient
 
 
+def extract_house_number(text: str) -> str:
+    """Extract candidate house/building number (typically the first number)."""
+    nums = extract_numbers(text)
+    return nums[0] if nums else ""
+
+
 def get_multi_view_address(address: str) -> Dict[str, object]:
     """Generate multi-view representation of a business address."""
     raw = str(address).strip() if address is not None else ""
     norm = normalize_address(raw)
+    cleaned = clean_basic(raw)
     numbers = extract_numbers(raw)
     postal_codes = extract_postal_codes(raw)
     salient = extract_salient_tokens(raw)
-    
+
     first_num = numbers[0] if numbers else ""
+    second_num = numbers[1] if len(numbers) >= 2 else ""
+    first_postal = postal_codes[0] if postal_codes else ""
     first_salient = salient[0] if salient else ""
     second_salient = salient[1] if len(salient) >= 2 else ""
 
-    # Sort salient tokens for order-invariant address matching
-    sorted_salient = sorted(salient)
+    tokens = norm.split()
+    token_set = set(tokens)
+
+    # Character 3-grams
+    clean_no_space = cleaned.replace(" ", "")
+    char_3grams: Set[str] = set()
+    if len(clean_no_space) >= 3:
+        char_3grams = {clean_no_space[i : i + 3] for i in range(len(clean_no_space) - 2)}
 
     return {
         "raw": raw,
-        "clean": norm,
+        "clean": cleaned,
+        "norm": norm,
+        "tokens": tokens,
+        "token_set": token_set,
         "numbers": numbers,
+        "number_set": set(numbers),
+        "first_num": first_num,
+        "second_num": second_num,
         "postal_codes": postal_codes,
-        "primary_number": first_num,
-        "salient_tokens": salient,
-        "sorted_salient": sorted_salient,
-        "primary_salient": first_salient,
-        "secondary_salient": second_salient,
+        "first_postal": first_postal,
+        "salient": salient,
+        "salient_set": set(salient),
+        "first_salient": first_salient,
+        "second_salient": second_salient,
+        "char_3grams": char_3grams,
+        "is_empty": (len(raw) == 0),
     }
-

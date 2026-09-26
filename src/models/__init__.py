@@ -1,11 +1,9 @@
-"""Models module exports."""
+"""Model module exports."""
 
-from src.models.classifier import (
-    BaselineDeterministicMatcher,
-    LightGBMPairClassifier,
-)
+from src.models.classifier import LightGBMPairClassifier
+from src.models.xgboost_classifier import XGBoostPairClassifier
 
 __all__ = [
     "LightGBMPairClassifier",
-    "BaselineDeterministicMatcher",
+    "XGBoostPairClassifier",
 ]

@@ -48,8 +48,8 @@ def compute_s2_s3_consensus(
 
         has_cross_peer.append(1.0)
         curr_pv = precomputed_targets[tid]
-        curr_name_toks = curr_pv["name_tokens"]
-        curr_prim_num = curr_pv["addr"]["primary_number"]
+        curr_name_toks = curr_pv.get("name_tokens") or curr_pv.get("name", {}).get("tokens", [])
+        curr_prim_num = curr_pv.get("addr", {}).get("first_num") or curr_pv.get("addr", {}).get("primary_number", "")
 
         max_jacc = 0.0
         num_match = 0.0
@@ -58,11 +58,12 @@ def compute_s2_s3_consensus(
             if ptid not in precomputed_targets:
                 continue
             peer_pv = precomputed_targets[ptid]
-            jacc = jaccard_similarity(curr_name_toks, peer_pv["name_tokens"])
+            peer_name_toks = peer_pv.get("name_tokens") or peer_pv.get("name", {}).get("tokens", [])
+            jacc = jaccard_similarity(curr_name_toks, peer_name_toks)
             if jacc > max_jacc:
                 max_jacc = jacc
 
-            peer_num = peer_pv["addr"]["primary_number"]
+            peer_num = peer_pv.get("addr", {}).get("first_num") or peer_pv.get("addr", {}).get("primary_number", "")
             if curr_prim_num and peer_num and curr_prim_num == peer_num:
                 num_match = 1.0
 

@@ -226,3 +226,26 @@ def validate_submission_package(
 
     report.is_valid = len(report.errors) == 0
     return report
+
+
+validate_submission_files = validate_submission_package
+
+
+class SubmissionValidator:
+    """Class wrapper for entity resolution submission validation."""
+
+    def __init__(self, test_dir: str = "resources/student_resource/dataset/test"):
+        self.test_dir = test_dir
+
+    def validate(
+        self,
+        matching_path: str,
+        candidate_path: Optional[str] = None,
+        run_official_script: bool = False,
+    ) -> ERValidationReport:
+        return validate_submission_files(
+            matching_path=matching_path,
+            candidate_path=candidate_path,
+            test_dir=self.test_dir,
+            run_official_script=run_official_script,
+        )

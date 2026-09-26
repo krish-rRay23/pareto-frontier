@@ -1,10 +1,9 @@
 """Training module exports."""
 
 from src.training.logger import ExperimentLogger
-from src.training.trainer import CrossValidationTrainer, create_model_instance
+from src.training.hard_negative_miner import HardNegativeMiner
 
 __all__ = [
     "ExperimentLogger",
-    "CrossValidationTrainer",
-    "create_model_instance",
+    "HardNegativeMiner",
 ]

@@ -2,18 +2,20 @@
 
 from src.inference.decision_policy import (
     PrecisionDecisionPolicy,
+    ExpectedF05DecisionDecoder,
+    TargetExclusivityResolver,
+    ContradictionChecker,
     optimize_decision_policy,
 )
-from src.inference.pipeline import EntityResolutionPipeline
-from src.inference.submission_validator import (
-    ERValidationReport,
-    validate_submission_package,
-)
+from src.inference.calibration import ProbabilityCalibrator
+from src.inference.submission_validator import SubmissionValidator
 
 __all__ = [
     "PrecisionDecisionPolicy",
+    "ExpectedF05DecisionDecoder",
+    "TargetExclusivityResolver",
+    "ContradictionChecker",
     "optimize_decision_policy",
-    "EntityResolutionPipeline",
-    "ERValidationReport",
-    "validate_submission_package",
+    "ProbabilityCalibrator",
+    "SubmissionValidator",
 ]
