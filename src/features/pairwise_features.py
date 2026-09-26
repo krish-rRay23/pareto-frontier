@@ -20,14 +20,25 @@ from src.normalization.address_normalizer import get_multi_view_address
 from src.normalization.text_normalizer import get_multi_view_name
 
 
+try:
+    import rapidfuzz.distance.JaroWinkler as rf_jw
+    import rapidfuzz.distance.Levenshtein as rf_lev
+    HAS_RAPIDFUZZ = True
+except ImportError:
+    HAS_RAPIDFUZZ = False
+
+
 def jaro_winkler_similarity(s1: str, s2: str, p: float = 0.1, max_l: int = 4) -> float:
-    """Fast Jaro-Winkler string similarity implementation."""
+    """Fast Jaro-Winkler string similarity implementation with C-level rapidfuzz acceleration."""
     if not s1 and not s2:
         return 1.0
     if not s1 or not s2:
         return 0.0
     if s1 == s2:
         return 1.0
+
+    if HAS_RAPIDFUZZ:
+        return float(rf_jw.similarity(s1, s2, prefix_weight=p))
 
     len1, len2 = len(s1), len(s2)
     match_distance = max(len1, len2) // 2 - 1
@@ -80,13 +91,16 @@ def jaro_winkler_similarity(s1: str, s2: str, p: float = 0.1, max_l: int = 4) ->
 
 
 def sequence_match_ratio(str_a: str, str_b: str) -> float:
-    """Compute normalized sequence similarity ratio using difflib with fast short-circuiting."""
+    """Compute normalized sequence similarity ratio with rapidfuzz C-acceleration."""
     if not str_a and not str_b:
         return 1.0
     if not str_a or not str_b:
         return 0.0
     if str_a == str_b:
         return 1.0
+
+    if HAS_RAPIDFUZZ:
+        return float(rf_lev.normalized_similarity(str_a, str_b))
 
     len_a = len(str_a)
     len_b = len(str_b)

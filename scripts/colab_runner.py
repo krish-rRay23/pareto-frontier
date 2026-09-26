@@ -383,8 +383,8 @@ def run_resumable_inference(
     target_store = SQLiteTargetStore(db_path=db_path)
 
     retriever = MultiChannelBidirectionalRetriever(
-        default_budget=35,
-        ambiguous_budget=70,
+        default_budget=15,
+        ambiguous_budget=30,
         enable_reverse=False,
     )
 
