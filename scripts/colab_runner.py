@@ -364,31 +364,13 @@ def run_resumable_inference(
 
     console.print(f"[green]Loaded {len(target_store):,} test target pool entities in {time.time()-t0_load:.1f}s (RAM: ~600 MB).[/green]")
 
-    # Check if retriever is already cached on disk
-    checkpoint_dir = os.path.join(output_dir, "checkpoints")
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    local_retriever_ckpt = "/content/local_data/retriever_index.joblib"
-
-    if os.path.isfile(local_retriever_ckpt):
-        console.print(f"[bold green]>>> Loading pre-indexed Retriever from fast SSD: {local_retriever_ckpt}...[/bold green]")
-        retriever = joblib.load(local_retriever_ckpt)
-    else:
-        console.print(f"[bold cyan]>>> Step 2: Indexing Targets in Multi-Channel Retriever...[/bold cyan]")
-        retriever = MultiChannelBidirectionalRetriever(
-            default_budget=35,
-            ambiguous_budget=70,
-            enable_reverse=False,
-        )
-        retriever.fit_targets(target_store.data)
-        # Checkpoint retriever to fast local SSD so we never have to re-index!
-        if os.path.exists("/content/local_data"):
-            try:
-                console.print("    Caching retriever index to local SSD...")
-                joblib.dump(retriever, local_retriever_ckpt, compress=1)
-                console.print("    [green]Retriever index cached successfully![/green]")
-            except Exception as e:
-                console.print(f"    [yellow]Could not cache retriever: {e}[/yellow]")
-
+    console.print(f"[bold cyan]>>> Step 2: Indexing Targets in Multi-Channel Retriever...[/bold cyan]")
+    retriever = MultiChannelBidirectionalRetriever(
+        default_budget=35,
+        ambiguous_budget=70,
+        enable_reverse=False,
+    )
+    retriever.fit_targets(target_store.data)
     target_dict = target_store
     gc.collect()
 
