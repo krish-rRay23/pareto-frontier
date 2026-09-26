@@ -203,41 +203,53 @@ def get_trained_model(
         return saved_bundle["model"], saved_bundle["calibrator"], saved_bundle["policy"]
 
     console.print(f"[bold yellow]>>> No checkpoint found. Training high-precision ensemble ({n_train_s1:,} S1s)...[/bold yellow]")
-    s1_all = load_source_tsv(os.path.join(train_dir, "train_source1.tsv"))
-    s1_sample = s1_all[:n_train_s1]
+    s1_sample = load_source_tsv(os.path.join(train_dir, "train_source1.tsv"), max_rows=n_train_s1)
     s1_sample_ids = {r["entity_id"] for r in s1_sample}
+    console.print(f"    Loaded {len(s1_sample):,} Source 1 training queries.")
 
     gt_all = load_ground_truth(os.path.join(train_dir, "train_ground_truth.tsv"))
     gt_sample = {sid: gt_all[sid] for sid in s1_sample_ids if sid in gt_all}
-
-    # Gather required targets
     needed_tids = {tid for tids in gt_sample.values() for tid in tids}
-    console.print(f"    Loading reference targets for training...")
-    s2_all = load_source_tsv(os.path.join(train_dir, "train_source2.tsv"))
-    s3_all = load_source_tsv(os.path.join(train_dir, "train_source3.tsv"))
-    all_targets = s2_all + s3_all
+    console.print(f"    Loaded ground truth ({len(gt_sample):,} labeled S1s, {len(needed_tids):,} positive targets).")
+
+    # Fast targeted loading of targets
+    console.print("    Loading reference targets for training (positive matches + hard negative pool)...")
+    s2_pos = load_source_tsv(os.path.join(train_dir, "train_source2.tsv"), filter_ids=needed_tids)
+    s3_pos = load_source_tsv(os.path.join(train_dir, "train_source3.tsv"), filter_ids=needed_tids)
+    s2_bg = load_source_tsv(os.path.join(train_dir, "train_source2.tsv"), max_rows=100000)
+    s3_bg = load_source_tsv(os.path.join(train_dir, "train_source3.tsv"), max_rows=100000)
+
+    target_pool_dict = {}
+    for r in (s2_pos + s3_pos + s2_bg + s3_bg):
+        target_pool_dict[str(r["entity_id"])] = r
+    all_targets = list(target_pool_dict.values())
+    console.print(f"    [green]Indexed training target pool: {len(all_targets):,} entities.[/green]")
 
     # Index targets and retrieve pairs
+    console.print("    Building multi-channel retrieval index...")
     retriever = MultiChannelBidirectionalRetriever(default_budget=40, ambiguous_budget=80)
     retriever.fit_targets(all_targets)
     retriever.fit_s1_reverse(s1_sample)
 
     s1_dict = {str(r["entity_id"]): r for r in s1_sample}
-    target_dict = {str(r["entity_id"]): r for r in all_targets}
+    target_dict = target_pool_dict
     s1_pre = {sid: precompute_record_views(s1_dict[sid]) for sid in s1_dict}
     tgt_pre = retriever.target_precomputed
 
     train_pairs: List[Tuple[str, str]] = []
     prov_map: Dict[Tuple[str, str], RetrievalProvenance] = {}
-    for s1 in s1_sample:
+    console.print("    Retrieving candidate pairs for training queries...")
+    for i, s1 in enumerate(s1_sample):
         sid = str(s1["entity_id"])
         cands, p_dict = retriever.query_entity(s1, precomputed_s1=s1_pre[sid])
         for tid in cands:
             train_pairs.append((sid, tid))
             prov_map[(sid, tid)] = p_dict[tid]
+        if (i + 1) % 10000 == 0 or (i + 1) == len(s1_sample):
+            console.print(f"        Retrieved candidates for {i+1:,}/{len(s1_sample):,} queries ({len(train_pairs):,} candidate pairs)...")
 
     # Build features
-    console.print(f"    Extracting features for {len(train_pairs):,} training pairs...")
+    console.print(f"    Extracting 86 pairwise + consensus + context features for {len(train_pairs):,} pairs...")
     X = build_pairwise_feature_dataframe(train_pairs, s1_dict, target_dict, s1_pre, tgt_pre, prov_map)
     cons_df = compute_s2_s3_consensus(train_pairs, target_dict, tgt_pre)
     ctx_df = compute_context_and_competition_features(train_pairs, s1_pre, tgt_pre)
