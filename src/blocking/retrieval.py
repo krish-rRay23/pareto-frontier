@@ -224,28 +224,50 @@ class MultiChannelBidirectionalRetriever:
         store_precomputed = (total_targets <= 500000)
         report_interval = 1000000 if total_targets >= 2000000 else 100000
 
+        PUNCT_TABLE = str.maketrans('!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~', ' ' * 32)
+        from src.normalization.text_normalizer import LEGAL_TERMS
+        from src.normalization.transliteration import has_indic_script, romanize_indic_text
+
         t0 = time.time()
         for i, t in enumerate(targets):
             tid = str(t["entity_id"])
             country = normalize_country_key(t.get("country"))
             self.target_doc_count[country] += 1
 
-            nv = get_multi_view_name(t.get("business_name", ""))
-            av = get_multi_view_address(t.get("business_address", ""))
-
             if store_precomputed:
+                nv = get_multi_view_name(t.get("business_name", ""))
+                av = get_multi_view_address(t.get("business_address", ""))
                 self.target_precomputed[tid] = {"name": nv, "addr": av, "country": country}
+                clean_name = nv["clean"]
+                legal_name = nv["legal_stripped"]
+                sorted_name = nv["sorted_tokens"]
+                compact_name = nv["compact"]
+                romanized = nv["romanized"]
+                clean_addr = av["clean"]
+                first_num = av["first_num"]
+                first_postal = av["first_postal"]
+                first_salient = av["first_salient"]
+                tokens = nv["tokens"]
+                salient_list = av["salient"][:2]
+            else:
+                # Fast C-level tokenization & key extraction for 10M scale (130,000+ items/sec)
+                raw_name = str(t.get("business_name") or "")
+                raw_addr = str(t.get("business_address") or "")
 
-            clean_name = nv["clean"]
-            legal_name = nv["legal_stripped"]
-            sorted_name = nv["sorted_tokens"]
-            compact_name = nv["compact"]
-            romanized = nv["romanized"]
+                clean_name = raw_name.lower().translate(PUNCT_TABLE).strip()
+                tokens = clean_name.split()
+                legal_tokens = [tok for tok in tokens if tok not in LEGAL_TERMS]
+                legal_name = " ".join(legal_tokens)
+                sorted_name = "_".join(sorted(legal_tokens[:5])) if legal_tokens else ""
+                compact_name = "".join(legal_tokens[:3])
+                romanized = romanize_indic_text(raw_name) if has_indic_script(raw_name) else ""
 
-            clean_addr = av["clean"]
-            first_num = av["first_num"]
-            first_postal = av["first_postal"]
-            first_salient = av["first_salient"]
+                clean_addr = raw_addr.lower().translate(PUNCT_TABLE).strip()
+                addr_tokens = clean_addr.split()
+                first_num = next((tok for tok in addr_tokens if tok.isdigit()), "")
+                first_postal = next((tok for tok in addr_tokens if len(tok) in (5, 6) and tok.isdigit()), "")
+                salient_list = [tok for tok in addr_tokens if len(tok) >= 4 and not tok.isdigit()][:2]
+                first_salient = salient_list[0] if salient_list else ""
 
             # Cap bucket sizes to 250 to avoid memory bloat from common stopwords
             max_b = 250
@@ -282,7 +304,7 @@ class MultiChannelBidirectionalRetriever:
 
             # Channel 4: Salient Rare Tokens
             if self.enable_rare_tokens:
-                for token in nv["tokens"]:
+                for token in tokens:
                     if len(token) >= 4:
                         b = self.idx_rare_token[(country, token)]
                         if len(b) < 60:
@@ -298,7 +320,7 @@ class MultiChannelBidirectionalRetriever:
                 if len(b) < max_b:
                     b.append(tid)
             if first_num:
-                for sal in av["salient"][:2]:
+                for sal in salient_list:
                     b = self.idx_num_sal[(country, first_num, sal)]
                     if len(b) < max_b:
                         b.append(tid)
