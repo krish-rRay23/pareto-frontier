@@ -330,7 +330,6 @@ def run_resumable_inference(
     retriever = MultiChannelBidirectionalRetriever(default_budget=35, ambiguous_budget=70)
     retriever.fit_targets(test_targets)
     target_dict = {str(r["entity_id"]): r for r in test_targets}
-    tgt_pre = retriever.target_precomputed
 
     console.print(f"[bold cyan]>>> Step 3: Loading Test Source 1 Queries...[/bold cyan]")
     s1_test = load_source_tsv(os.path.join(test_dir, "test_source1.tsv"))
@@ -378,9 +377,13 @@ def run_resumable_inference(
             # All singletons
             matches_dict = {str(s1["entity_id"]): set() for s1 in chunk_s1}
         else:
+            # Precompute multi-views on the fly for the ~50,000 unique target candidates in this chunk (<0.3s)
+            chunk_tids = {tid for _, tid in chunk_pairs}
+            tgt_pre = {tid: precompute_record_views(target_dict[tid]) for tid in chunk_tids if tid in target_dict}
+
             # Build features & predict
             X_chunk = build_pairwise_feature_dataframe(
-                chunk_pairs, s1_chunk_dict, target_dict, s1_chunk_pre, tgt_pre, chunk_prov
+                chunk_pairs, s1_chunk_dict, target_dict, s1_chunk_pre, tgt_pre, chunk_prov, show_progress=False
             )
             cons_chunk = compute_s2_s3_consensus(chunk_pairs, target_dict, tgt_pre)
             ctx_chunk = compute_context_and_competition_features(chunk_pairs, s1_chunk_pre, tgt_pre)

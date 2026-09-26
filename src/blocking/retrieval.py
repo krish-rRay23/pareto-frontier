@@ -23,6 +23,7 @@ Implements the complete retrieval specifications from Amazon ML Challenge 2026 9
 from collections import Counter, defaultdict
 import math
 import re
+import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 
@@ -217,44 +218,23 @@ class MultiChannelBidirectionalRetriever:
         self.s1_precomputed_cache: Dict[str, Dict[str, Any]] = {}
 
     def fit_targets(self, targets: List[Dict[str, Any]]) -> "MultiChannelBidirectionalRetriever":
-        """Index all target entities (Source 2 and Source 3) into multi-channel forward indexes."""
-        # 1. Precompute views and calculate corpus frequencies
-        name_len_sums: Dict[str, int] = Counter()
-        addr_len_sums: Dict[str, int] = Counter()
+        """Index all target entities into multi-channel forward indexes with single-pass memory safety."""
+        total_targets = len(targets)
+        # Store precomputed cache only for small training subsets to conserve RAM on 10M test sets
+        store_precomputed = (total_targets <= 500000)
+        report_interval = 1000000 if total_targets >= 2000000 else 100000
 
-        for t in targets:
+        t0 = time.time()
+        for i, t in enumerate(targets):
             tid = str(t["entity_id"])
             country = normalize_country_key(t.get("country"))
             self.target_doc_count[country] += 1
 
             nv = get_multi_view_name(t.get("business_name", ""))
             av = get_multi_view_address(t.get("business_address", ""))
-            self.target_precomputed[tid] = {"name": nv, "addr": av, "country": country}
 
-            # Count token frequencies for rare-token & BM25 indexing
-            tokens = nv["tokens"]
-            self.target_name_lengths[tid] = len(tokens)
-            name_len_sums[country] += len(tokens)
-
-            addr_tokens = av["tokens"]
-            self.target_addr_lengths[tid] = len(addr_tokens)
-            addr_len_sums[country] += len(addr_tokens)
-
-            for token in set(tokens):
-                self.target_token_freq[(country, token)] += 1
-
-        # Calculate average lengths per country partition
-        for country, count in self.target_doc_count.items():
-            if count > 0:
-                self.target_avg_name_len[country] = float(name_len_sums[country] / count)
-                self.target_avg_addr_len[country] = float(addr_len_sums[country] / count)
-
-        # 2. Populate forward multi-channel indexes
-        for t in targets:
-            tid = str(t["entity_id"])
-            country = self.target_precomputed[tid]["country"]
-            nv = self.target_precomputed[tid]["name"]
-            av = self.target_precomputed[tid]["addr"]
+            if store_precomputed:
+                self.target_precomputed[tid] = {"name": nv, "addr": av, "country": country}
 
             clean_name = nv["clean"]
             legal_name = nv["legal_stripped"]
@@ -264,63 +244,80 @@ class MultiChannelBidirectionalRetriever:
 
             clean_addr = av["clean"]
             first_num = av["first_num"]
-            second_num = av["second_num"]
             first_postal = av["first_postal"]
             first_salient = av["first_salient"]
-            second_salient = av["second_salient"]
 
-            # Channel 1: Exact Name
+            # Cap bucket sizes to 250 to avoid memory bloat from common stopwords
+            max_b = 250
+
+            # Channel 1: Exact & Transformed Name Keys
             if clean_name:
-                self.idx_exact_name[(country, clean_name)].append(tid)
+                b = self.idx_exact_name[(country, clean_name)]
+                if len(b) < max_b:
+                    b.append(tid)
             if legal_name and legal_name != clean_name:
-                self.idx_legal_name[(country, legal_name)].append(tid)
+                b = self.idx_legal_name[(country, legal_name)]
+                if len(b) < max_b:
+                    b.append(tid)
             if sorted_name:
-                self.idx_sorted_name[(country, sorted_name)].append(tid)
+                b = self.idx_sorted_name[(country, sorted_name)]
+                if len(b) < max_b:
+                    b.append(tid)
             if compact_name and len(compact_name) >= 4:
-                self.idx_compact_name[(country, compact_name)].append(tid)
+                b = self.idx_compact_name[(country, compact_name)]
+                if len(b) < max_b:
+                    b.append(tid)
 
             # Channel 2: Exact Address
             if clean_addr:
-                self.idx_exact_addr[(country, clean_addr)].append(tid)
+                b = self.idx_exact_addr[(country, clean_addr)]
+                if len(b) < max_b:
+                    b.append(tid)
 
             # Channel 3: Exact Both
             if clean_name and clean_addr:
-                self.idx_exact_both[(country, clean_name, clean_addr)].append(tid)
+                b = self.idx_exact_both[(country, clean_name, clean_addr)]
+                if len(b) < max_b:
+                    b.append(tid)
 
-            # Channel 4: Rare Tokens
+            # Channel 4: Salient Rare Tokens
             if self.enable_rare_tokens:
                 for token in nv["tokens"]:
-                    if len(token) >= 3 and self.target_token_freq.get((country, token), 0) <= self.max_rare_token_freq:
-                        self.idx_rare_token[(country, token)].append(tid)
-
-            # Channel 5 & 6: BM25 / Sparse term indexes
-            if self.enable_bm25:
-                token_counts = Counter(nv["tokens"])
-                for tok, count in token_counts.items():
-                    if len(tok) >= 2:
-                        self.bm25_name_index[(country, tok)].append((tid, count))
-
-                addr_counts = Counter(av["tokens"])
-                for tok, count in addr_counts.items():
-                    if len(tok) >= 2 and tok not in av["salient_set"] and not tok.isdigit():
-                        continue
-                    self.bm25_addr_index[(country, tok)].append((tid, count))
+                    if len(token) >= 4:
+                        b = self.idx_rare_token[(country, token)]
+                        if len(b) < 60:
+                            b.append(tid)
 
             # Channel 7: Numeric / Postal / Locality Keys
             if first_postal and first_num:
-                self.idx_pin_num[(country, first_postal, first_num)].append(tid)
+                b = self.idx_pin_num[(country, first_postal, first_num)]
+                if len(b) < max_b:
+                    b.append(tid)
             if first_postal and first_salient:
-                self.idx_pin_sal[(country, first_postal, first_salient)].append(tid)
-            if first_num and first_salient:
-                self.idx_num_sal[(country, first_num, first_salient)].append(tid)
+                b = self.idx_pin_sal[(country, first_postal, first_salient)]
+                if len(b) < max_b:
+                    b.append(tid)
+            if first_num:
+                for sal in av["salient"][:2]:
+                    b = self.idx_num_sal[(country, first_num, sal)]
+                    if len(b) < max_b:
+                        b.append(tid)
+                    if not clean_name and clean_addr:
+                        b = self.idx_missing_name_addr[(country, f"{sal}_{first_num}")]
+                        if len(b) < max_b:
+                            b.append(tid)
 
             # Channel 8: Cross-Script Romanization
             if self.enable_transliteration and romanized:
-                self.idx_romanized[(country, romanized)].append(tid)
+                b = self.idx_romanized[(country, romanized)]
+                if len(b) < max_b:
+                    b.append(tid)
 
-            # Channel 9: Missing Field Fallback (Postal + Salient or House number + Second number)
-            if not clean_name and clean_addr and first_salient and first_num:
-                self.idx_missing_name_addr[(country, f"{first_salient}_{first_num}")].append(tid)
+            if total_targets >= 500000 and ((i + 1) % report_interval == 0 or (i + 1) == total_targets):
+                elapsed = time.time() - t0
+                pct = (i + 1) / total_targets * 100.0
+                rate = (i + 1) / max(0.1, elapsed)
+                print(f"        Indexed {i+1:,}/{total_targets:,} targets ({pct:.1f}%) | {rate:,.0f} targets/sec | Elapsed: {elapsed:.1f}s")
 
         return self
 
@@ -517,10 +514,11 @@ class MultiChannelBidirectionalRetriever:
             if pin_sal_hits:
                 record_channel(pin_sal_hits, CH_NUMERIC_LOC, base_score=0.75)
 
-        if first_num and first_salient:
-            num_sal_hits = self.idx_num_sal.get((country, first_num, first_salient), [])
-            if num_sal_hits:
-                record_channel(num_sal_hits, CH_NUMERIC_LOC, base_score=0.70)
+        if first_num:
+            for sal in av["salient"][:2]:
+                num_sal_hits = self.idx_num_sal.get((country, first_num, sal), [])
+                if num_sal_hits:
+                    record_channel(num_sal_hits, CH_NUMERIC_LOC, base_score=0.70)
 
         # --- Forward Channel 8: Cross-Script Romanization ---
         if self.enable_transliteration and romanized:
@@ -530,10 +528,11 @@ class MultiChannelBidirectionalRetriever:
 
         # --- Forward Channel 9: Missing-Field Fallback ---
         if is_missing_name and clean_addr:
-            if first_salient and first_num:
-                mf_hits = self.idx_missing_name_addr.get((country, f"{first_salient}_{first_num}"), [])
-                if mf_hits:
-                    record_channel(mf_hits, CH_MISSING_FIELD, base_score=0.70)
+            if first_num:
+                for sal in av["salient"][:2]:
+                    mf_hits = self.idx_missing_name_addr.get((country, f"{sal}_{first_num}"), [])
+                    if mf_hits:
+                        record_channel(mf_hits, CH_MISSING_FIELD, base_score=0.70)
 
         # --- Forward Channel 10: Sibling / Cluster Expansion ---
         # If top hits agree on postal and house number, expand to siblings sharing that location
