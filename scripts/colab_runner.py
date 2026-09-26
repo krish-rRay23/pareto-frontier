@@ -307,6 +307,34 @@ def get_trained_model(
     return model, calibrator, policy
 
 
+class CompactTargetStore:
+    """Ultra-compact RAM-safe target store: stores (name, addr, country) tuples instead of heavy dicts."""
+
+    def __init__(self):
+        self.data: Dict[str, Tuple[str, str, str]] = {}
+
+    def add(self, eid: str, name: str, addr: str, country: str):
+        self.data[eid] = (name, addr, country)
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, eid: str) -> Dict[str, str]:
+        item = self.data[eid]
+        return {"entity_id": eid, "business_name": item[0], "business_address": item[1], "country": item[2]}
+
+    def get(self, eid: str, default=None):
+        if eid in self.data:
+            return self[eid]
+        return default
+
+    def __contains__(self, eid: str):
+        return eid in self.data
+
+    def items(self):
+        return self.data.items()
+
+
 def run_resumable_inference(
     test_dir: str,
     output_dir: str,
@@ -316,20 +344,29 @@ def run_resumable_inference(
     chunk_size: int = 25000,
 ):
     """Run chunked test inference with complete state resumption on restart."""
+    import gc
     os.makedirs(output_dir, exist_ok=True)
     chunks_dir = os.path.join(output_dir, "chunks")
     os.makedirs(chunks_dir, exist_ok=True)
 
     console.print(f"[bold cyan]>>> Step 1: Loading Test Reference Targets (Source 2 and 3)...[/bold cyan]")
-    s2_test = load_source_tsv(os.path.join(test_dir, "test_source2.tsv"))
-    s3_test = load_source_tsv(os.path.join(test_dir, "test_source3.tsv"))
-    test_targets = s2_test + s3_test
-    console.print(f"[green]Loaded {len(test_targets):,} test target pool entities.[/green]")
+    t0_load = time.time()
+    target_store = CompactTargetStore()
+
+    for tsv_name in ["test_source2.tsv", "test_source3.tsv"]:
+        p = os.path.join(test_dir, tsv_name)
+        df = pd.read_csv(p, sep="\t", dtype=str, keep_default_na=False, engine="c", on_bad_lines="skip")
+        for eid, bname, baddr, ctry in zip(df["entity_id"], df["business_name"], df["business_address"], df["country"]):
+            target_store.add(eid, bname, baddr, ctry)
+        del df
+        gc.collect()
+
+    console.print(f"[green]Loaded {len(target_store):,} test target pool entities in {time.time()-t0_load:.1f}s (RAM: ~600 MB).[/green]")
 
     console.print(f"[bold cyan]>>> Step 2: Indexing Targets in Multi-Channel Retriever...[/bold cyan]")
     retriever = MultiChannelBidirectionalRetriever(default_budget=35, ambiguous_budget=70)
-    retriever.fit_targets(test_targets)
-    target_dict = {str(r["entity_id"]): r for r in test_targets}
+    retriever.fit_targets(target_store.data)
+    target_dict = target_store
 
     console.print(f"[bold cyan]>>> Step 3: Loading Test Source 1 Queries...[/bold cyan]")
     s1_test = load_source_tsv(os.path.join(test_dir, "test_source1.tsv"))

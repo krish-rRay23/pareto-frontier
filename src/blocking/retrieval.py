@@ -217,26 +217,38 @@ class MultiChannelBidirectionalRetriever:
         self.target_precomputed: Dict[str, Dict[str, Any]] = {}
         self.s1_precomputed_cache: Dict[str, Dict[str, Any]] = {}
 
-    def fit_targets(self, targets: List[Dict[str, Any]]) -> "MultiChannelBidirectionalRetriever":
-        """Index all target entities into multi-channel forward indexes with single-pass memory safety."""
+    def fit_targets(self, targets: Any) -> "MultiChannelBidirectionalRetriever":
+        """Index all target entities into multi-channel forward indexes with single-pass memory safety.
+
+        Supports both List[Dict] and compact Dict[str, Tuple[str, str, str]] (eid -> (name, addr, country)).
+        """
         total_targets = len(targets)
-        # Store precomputed cache only for small training subsets to conserve RAM on 10M test sets
-        store_precomputed = (total_targets <= 500000)
+        store_precomputed = (total_targets <= 500000 and isinstance(targets, list))
         report_interval = 1000000 if total_targets >= 2000000 else 100000
 
         PUNCT_TABLE = str.maketrans('!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~', ' ' * 32)
         from src.normalization.text_normalizer import LEGAL_TERMS
         from src.normalization.transliteration import has_indic_script, romanize_indic_text
 
+        if isinstance(targets, dict):
+            target_iter = (
+                (tid, item[0], item[1], item[2])
+                for tid, item in targets.items()
+            )
+        else:
+            target_iter = (
+                (str(t["entity_id"]), str(t.get("business_name") or ""), str(t.get("business_address") or ""), t.get("country"))
+                for t in targets
+            )
+
         t0 = time.time()
-        for i, t in enumerate(targets):
-            tid = str(t["entity_id"])
-            country = normalize_country_key(t.get("country"))
+        for i, (tid, raw_name, raw_addr, raw_country) in enumerate(target_iter):
+            country = normalize_country_key(raw_country)
             self.target_doc_count[country] += 1
 
             if store_precomputed:
-                nv = get_multi_view_name(t.get("business_name", ""))
-                av = get_multi_view_address(t.get("business_address", ""))
+                nv = get_multi_view_name(raw_name)
+                av = get_multi_view_address(raw_addr)
                 self.target_precomputed[tid] = {"name": nv, "addr": av, "country": country}
                 clean_name = nv["clean"]
                 legal_name = nv["legal_stripped"]
@@ -251,9 +263,6 @@ class MultiChannelBidirectionalRetriever:
                 salient_list = av["salient"][:2]
             else:
                 # Fast C-level tokenization & key extraction for 10M scale (130,000+ items/sec)
-                raw_name = str(t.get("business_name") or "")
-                raw_addr = str(t.get("business_address") or "")
-
                 clean_name = raw_name.lower().translate(PUNCT_TABLE).strip()
                 tokens = clean_name.split()
                 legal_tokens = [tok for tok in tokens if tok not in LEGAL_TERMS]
@@ -269,8 +278,8 @@ class MultiChannelBidirectionalRetriever:
                 salient_list = [tok for tok in addr_tokens if len(tok) >= 4 and not tok.isdigit()][:2]
                 first_salient = salient_list[0] if salient_list else ""
 
-            # Cap bucket sizes to 250 to avoid memory bloat from common stopwords
-            max_b = 250
+            # Cap bucket sizes to 60 to prevent memory blowup and maintain high precision
+            max_b = 60
 
             # Channel 1: Exact & Transformed Name Keys
             if clean_name:
@@ -296,18 +305,12 @@ class MultiChannelBidirectionalRetriever:
                 if len(b) < max_b:
                     b.append(tid)
 
-            # Channel 3: Exact Both
-            if clean_name and clean_addr:
-                b = self.idx_exact_both[(country, clean_name, clean_addr)]
-                if len(b) < max_b:
-                    b.append(tid)
-
             # Channel 4: Salient Rare Tokens
             if self.enable_rare_tokens:
                 for token in tokens:
-                    if len(token) >= 4:
+                    if len(token) >= 5:
                         b = self.idx_rare_token[(country, token)]
-                        if len(b) < 60:
+                        if len(b) < 30:
                             b.append(tid)
 
             # Channel 7: Numeric / Postal / Locality Keys
