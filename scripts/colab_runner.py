@@ -73,8 +73,8 @@ def parse_args():
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=25000,
-        help="Number of S1 test records per resumable checkpoint chunk",
+        default=2500,
+        help="Number of S1 test records per resumable checkpoint chunk (2500 is optimal for Colab RAM)",
     )
     parser.add_argument(
         "--n-train-s1",
