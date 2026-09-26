@@ -314,7 +314,8 @@ class CompactTargetStore:
         self.data: Dict[str, Tuple[str, str, str]] = {}
 
     def add(self, eid: str, name: str, addr: str, country: str):
-        self.data[eid] = (name, addr, country)
+        c_str = sys.intern(str(country).strip().lower()) if country else "unknown"
+        self.data[eid] = (name, addr, c_str)
 
     def __len__(self):
         return len(self.data)
@@ -364,7 +365,11 @@ def run_resumable_inference(
     console.print(f"[green]Loaded {len(target_store):,} test target pool entities in {time.time()-t0_load:.1f}s (RAM: ~600 MB).[/green]")
 
     console.print(f"[bold cyan]>>> Step 2: Indexing Targets in Multi-Channel Retriever...[/bold cyan]")
-    retriever = MultiChannelBidirectionalRetriever(default_budget=35, ambiguous_budget=70)
+    retriever = MultiChannelBidirectionalRetriever(
+        default_budget=35,
+        ambiguous_budget=70,
+        enable_reverse=False,
+    )
     retriever.fit_targets(target_store.data)
     target_dict = target_store
 
