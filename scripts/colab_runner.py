@@ -107,36 +107,83 @@ def resolve_dataset_path(base_path: str) -> str:
     return base_path
 
 
+def find_dataset_directories(root_dir: str) -> Tuple[Optional[str], Optional[str]]:
+    """Recursively find train and test directories containing TSV files."""
+    train_dir = None
+    test_dir = None
+
+    for root, dirs, files in os.walk(root_dir):
+        # Look for train_source1.tsv or train ground truth
+        if any("train_source1" in f for f in files) or any("train_ground_truth" in f for f in files):
+            train_dir = root
+        # Look for test_source1.tsv
+        if any("test_source1" in f for f in files):
+            test_dir = root
+        if train_dir and test_dir:
+            break
+
+    return train_dir, test_dir
+
+
 def copy_dataset_to_fast_ssd(src_dir: str, dst_dir: str) -> Tuple[str, str]:
     """Copy TSV files from Google Drive to Colab local SSD for 10x-20x I/O speedup."""
     src_dir = resolve_dataset_path(src_dir)
     train_dst = os.path.join(dst_dir, "train")
     test_dst = os.path.join(dst_dir, "test")
 
-    if os.path.exists(test_dst) and len(os.listdir(test_dst)) >= 3:
+    # If already copied on local SSD, return immediately
+    if (
+        os.path.exists(os.path.join(train_dst, "train_source1.tsv"))
+        and os.path.exists(os.path.join(test_dst, "test_source1.tsv"))
+    ):
         console.print(f"[green]Dataset already present on fast local SSD: {dst_dir}[/green]")
         return train_dst, test_dst
 
-    console.print(f"[bold cyan]>>> Copying dataset from Drive ({src_dir}) to fast local SSD ({dst_dir})...[/bold cyan]")
+    console.print(f"[bold cyan]>>> Locating and copying dataset from ({src_dir}) to fast local SSD ({dst_dir})...[/bold cyan]")
     os.makedirs(train_dst, exist_ok=True)
     os.makedirs(test_dst, exist_ok=True)
 
+    # 1. Direct path check
     train_src = os.path.join(src_dir, "train") if os.path.isdir(os.path.join(src_dir, "train")) else src_dir
     test_src = os.path.join(src_dir, "test") if os.path.isdir(os.path.join(src_dir, "test")) else src_dir
 
-    train_files = glob.glob(os.path.join(train_src, "train*.tsv")) or glob.glob(os.path.join(train_src, "*.tsv"))
+    train_files = glob.glob(os.path.join(train_src, "train*.tsv"))
+    test_files = glob.glob(os.path.join(test_src, "test*.tsv"))
+
+    # 2. If not found directly, perform recursive search
+    if not train_files or not test_files:
+        console.print(f"    [yellow]Files not found in direct subpaths. Searching recursively under {src_dir}...[/yellow]")
+        found_train, found_test = find_dataset_directories(src_dir)
+        
+        # If still not found, search the parent (e.g. if pointing to ML_challenge instead of ML_challenge/dataset)
+        if (not found_train or not found_test) and os.path.exists(os.path.dirname(src_dir)):
+            found_train, found_test = find_dataset_directories(os.path.dirname(src_dir))
+
+        if found_train:
+            train_src = found_train
+            train_files = glob.glob(os.path.join(train_src, "train*.tsv"))
+            console.print(f"    [green]Found train directory:[/green] {train_src}")
+        if found_test:
+            test_src = found_test
+            test_files = glob.glob(os.path.join(test_src, "test*.tsv"))
+            console.print(f"    [green]Found test directory:[/green] {test_src}")
+
+    if not train_files:
+        raise FileNotFoundError(
+            f"Could not locate 'train_source1.tsv' under '{src_dir}' or its parent directories.\n"
+            f"Please ensure the dataset is uploaded to Google Drive, or sync from S3 / GCS.\n"
+            f"In Colab, check: !ls -R /content/drive/MyDrive/ML_challenge"
+        )
+
     for f in train_files:
-        if "train" in os.path.basename(f) or not glob.glob(os.path.join(test_src, "test*.tsv")):
-            console.print(f"    Copying {os.path.basename(f)} to train...")
-            shutil.copy2(f, train_dst)
+        console.print(f"    Copying {os.path.basename(f)} to train...")
+        shutil.copy2(f, train_dst)
 
-    test_files = glob.glob(os.path.join(test_src, "test*.tsv")) or glob.glob(os.path.join(test_src, "*.tsv"))
     for f in test_files:
-        if "test" in os.path.basename(f):
-            console.print(f"    Copying {os.path.basename(f)} to test...")
-            shutil.copy2(f, test_dst)
+        console.print(f"    Copying {os.path.basename(f)} to test...")
+        shutil.copy2(f, test_dst)
 
-    console.print("[green]Dataset copied successfully to fast SSD![/green]\n")
+    console.print(f"[green]Dataset copied successfully to fast SSD! ({len(train_files)} train, {len(test_files)} test files)[/green]\n")
     return train_dst, test_dst
 
 
