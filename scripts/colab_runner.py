@@ -316,8 +316,24 @@ class SQLiteTargetStore:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
+        self._conn = None
+
+    def _get_conn(self) -> sqlite3.Connection:
+        if self._conn is None:
+            self._conn = sqlite3.connect(self.db_path)
+            self._conn.execute("PRAGMA synchronous = OFF")
+            self._conn.execute("PRAGMA journal_mode = MEMORY")
+            self._conn.execute("PRAGMA cache_size = -64000")  # 64 MB page cache
+            self._conn.execute("PRAGMA mmap_size = 3000000000")  # 3 GB memory mapped I/O
+        return self._conn
 
     def initialize(self):
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
         if os.path.exists(self.db_path):
             try:
                 os.remove(self.db_path)
@@ -332,15 +348,14 @@ class SQLiteTargetStore:
         conn.close()
 
     def insert_batch(self, rows: List[Tuple[str, str, str, str]]):
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_conn()
         conn.executemany("INSERT OR REPLACE INTO targets VALUES (?, ?, ?, ?)", rows)
         conn.commit()
-        conn.close()
 
     def fetch_candidates(self, entity_ids: Set[str]) -> Dict[str, Dict[str, str]]:
         if not entity_ids:
             return {}
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_conn()
         cur = conn.cursor()
         results = {}
         id_list = list(entity_ids)
@@ -359,8 +374,15 @@ class SQLiteTargetStore:
                     "business_address": addr,
                     "country": ctry,
                 }
-        conn.close()
         return results
+
+    def close(self):
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
 
 
 def run_resumable_inference(
@@ -424,6 +446,13 @@ def run_resumable_inference(
     contradiction_checker = ContradictionChecker()
     source_partition = SourcePartitionConstraint()
 
+    # High-speed bounded in-memory cache for recurring target views (~45 MB RAM)
+    target_view_cache: Dict[str, Any] = {}
+    target_rec_cache: Dict[str, Dict[str, str]] = {}
+
+    local_chunks_dir = os.path.join(local_scratch, "chunks") if os.path.exists(local_scratch) else chunks_dir
+    os.makedirs(local_chunks_dir, exist_ok=True)
+
     t_start = time.time()
 
     s1_stream = pd.read_csv(
@@ -471,10 +500,23 @@ def run_resumable_inference(
             # All singletons
             matches_dict = {str(s1["entity_id"]): set() for s1 in chunk_s1}
         else:
-            # Precompute multi-views on the fly for the unique target candidates in this chunk
+            # Fetch targets using high-speed bounded cache (bypasses SQLite for recurring targets)
             chunk_tids = {tid for _, tid in chunk_pairs}
-            chunk_target_dict = target_store.fetch_candidates(chunk_tids)
-            tgt_pre = {tid: precompute_record_views(chunk_target_dict[tid]) for tid in chunk_tids if tid in chunk_target_dict}
+            missing_tids = {tid for tid in chunk_tids if tid not in target_view_cache}
+            if missing_tids:
+                fetched = target_store.fetch_candidates(missing_tids)
+                for tid, rec in fetched.items():
+                    target_rec_cache[tid] = rec
+                    target_view_cache[tid] = precompute_record_views(rec)
+
+            chunk_target_dict = {tid: target_rec_cache[tid] for tid in chunk_tids if tid in target_rec_cache}
+            tgt_pre = {tid: target_view_cache[tid] for tid in chunk_tids if tid in target_view_cache}
+
+            # Bound cache size to prevent memory creep (strictly keeps RAM under 50 MB)
+            if len(target_view_cache) > 60000:
+                keep_keys = list(target_view_cache.keys())[-30000:]
+                target_view_cache = {k: target_view_cache[k] for k in keep_keys}
+                target_rec_cache = {k: target_rec_cache[k] for k in keep_keys}
 
             # Build features & predict
             X_chunk = build_pairwise_feature_dataframe(
@@ -495,20 +537,23 @@ def run_resumable_inference(
 
             del chunk_target_dict, X_chunk, cons_chunk, ctx_chunk, scores, cal_scores, tgt_pre
 
-        # Write chunk files
-        with open(c_match_file, "w", encoding="utf-8") as f_m:
-            for s1 in chunk_s1:
-                sid = str(s1["entity_id"])
-                m_str = ",".join(sorted(matches_dict.get(sid, set())))
-                f_m.write(f"{sid}\t{m_str}\n")
+        # Write chunk files: fast local SSD buffer + atomic copy to Google Drive
+        m_lines = [f"{s1['entity_id']}\t{','.join(sorted(matches_dict.get(str(s1['entity_id']), set())))}" for s1 in chunk_s1]
+        c_lines = [f"{s1['entity_id']}\t{','.join(sorted(cands_dict.get(str(s1['entity_id']), set())))}" for s1 in chunk_s1]
 
-        with open(c_cand_file, "w", encoding="utf-8") as f_c:
-            for s1 in chunk_s1:
-                sid = str(s1["entity_id"])
-                c_str = ",".join(sorted(cands_dict.get(sid, set())))
-                f_c.write(f"{sid}\t{c_str}\n")
+        local_m = os.path.join(local_chunks_dir, f"matching_chunk_{chunk_idx:04d}.tsv")
+        local_c = os.path.join(local_chunks_dir, f"candidate_chunk_{chunk_idx:04d}.tsv")
 
-        del chunk_s1, s1_chunk_dict, s1_chunk_pre, chunk_pairs, chunk_prov, cands_dict, matches_dict
+        with open(local_m, "w", encoding="utf-8") as f_m:
+            f_m.write("\n".join(m_lines) + "\n")
+        with open(local_c, "w", encoding="utf-8") as f_c:
+            f_c.write("\n".join(c_lines) + "\n")
+
+        if local_chunks_dir != chunks_dir:
+            shutil.copy2(local_m, c_match_file)
+            shutil.copy2(local_c, c_cand_file)
+
+        del chunk_s1, s1_chunk_dict, s1_chunk_pre, chunk_pairs, chunk_prov, cands_dict, matches_dict, m_lines, c_lines
         gc.collect()
 
         chunk_elapsed = time.time() - chunk_t0
