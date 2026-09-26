@@ -238,19 +238,36 @@ def get_trained_model(
 
     train_pairs: List[Tuple[str, str]] = []
     prov_map: Dict[Tuple[str, str], RetrievalProvenance] = {}
-    console.print("    Retrieving candidate pairs for training queries...")
+    console.print("    Retrieving and mining hard candidate pairs for training queries...")
+    max_negatives_per_s1 = 4
+
     for i, s1 in enumerate(s1_sample):
         sid = str(s1["entity_id"])
         cands, p_dict = retriever.query_entity(s1, precomputed_s1=s1_pre[sid])
+        true_tids = gt_sample.get(sid, set())
+
+        # 1. Always keep all true positive pairs
         for tid in cands:
+            if tid in true_tids:
+                train_pairs.append((sid, tid))
+                prov_map[(sid, tid)] = p_dict[tid]
+
+        # 2. Mine top hard negatives (highest retrieval agreement and score)
+        neg_cands = [tid for tid in cands if tid not in true_tids]
+        neg_cands.sort(
+            key=lambda t: (p_dict[t].agreement_count, p_dict[t].best_score),
+            reverse=True,
+        )
+        for tid in neg_cands[:max_negatives_per_s1]:
             train_pairs.append((sid, tid))
             prov_map[(sid, tid)] = p_dict[tid]
+
         if (i + 1) % 10000 == 0 or (i + 1) == len(s1_sample):
-            console.print(f"        Retrieved candidates for {i+1:,}/{len(s1_sample):,} queries ({len(train_pairs):,} candidate pairs)...")
+            console.print(f"        Retrieved & mined hard pairs for {i+1:,}/{len(s1_sample):,} queries ({len(train_pairs):,} hard pairs)...")
 
     # Build features
     console.print(f"    Extracting 86 pairwise + consensus + context features for {len(train_pairs):,} pairs...")
-    X = build_pairwise_feature_dataframe(train_pairs, s1_dict, target_dict, s1_pre, tgt_pre, prov_map)
+    X = build_pairwise_feature_dataframe(train_pairs, s1_dict, target_dict, s1_pre, tgt_pre, prov_map, show_progress=True)
     cons_df = compute_s2_s3_consensus(train_pairs, target_dict, tgt_pre)
     ctx_df = compute_context_and_competition_features(train_pairs, s1_pre, tgt_pre)
     X = pd.concat([X, cons_df, ctx_df], axis=1)

@@ -80,14 +80,30 @@ def jaro_winkler_similarity(s1: str, s2: str, p: float = 0.1, max_l: int = 4) ->
 
 
 def sequence_match_ratio(str_a: str, str_b: str) -> float:
-    """Compute normalized sequence similarity ratio using difflib."""
+    """Compute normalized sequence similarity ratio using difflib with fast short-circuiting."""
     if not str_a and not str_b:
         return 1.0
     if not str_a or not str_b:
         return 0.0
     if str_a == str_b:
         return 1.0
-    return float(difflib.SequenceMatcher(None, str_a, str_b).ratio())
+
+    len_a = len(str_a)
+    len_b = len(str_b)
+    # Quick length upper bound: max possible match ratio is 2 * min / (len_a + len_b)
+    max_possible = (2.0 * min(len_a, len_b)) / (len_a + len_b)
+    if max_possible < 0.25:
+        return float(max_possible * 0.5)
+
+    # For long strings, clamp to 80 chars to prevent O(N*M) explosion while preserving prefix/root match
+    if len_a > 80 or len_b > 80:
+        str_a = str_a[:80]
+        str_b = str_b[:80]
+
+    matcher = difflib.SequenceMatcher(None, str_a, str_b)
+    if matcher.quick_ratio() < 0.3:
+        return float(matcher.quick_ratio() * 0.8)
+    return float(matcher.ratio())
 
 
 def jaccard_similarity(set_a: Any, set_b: Any) -> float:
@@ -523,11 +539,14 @@ def build_pairwise_feature_dataframe(
     s1_precomputed: Dict[str, Dict[str, Any]],
     target_precomputed: Dict[str, Dict[str, Any]],
     provenance_map: Optional[Dict[Tuple[str, str], RetrievalProvenance]] = None,
+    show_progress: bool = True,
 ) -> pd.DataFrame:
-    """Vectorized build of pairwise feature matrix across candidate pairs."""
+    """Vectorized build of pairwise feature matrix across candidate pairs with progress tracking."""
     rows: List[List[float]] = []
+    total = len(pairs)
+    report_interval = 50000
 
-    for sid, tid in pairs:
+    for i, (sid, tid) in enumerate(pairs):
         s1 = s1_dict[sid]
         tgt = target_dict[tid]
         s1_pre = s1_precomputed[sid]
@@ -536,6 +555,10 @@ def build_pairwise_feature_dataframe(
 
         feat_row = extract_pair_features(s1, tgt, s1_pre, tgt_pre, prov)
         rows.append(feat_row)
+
+        if show_progress and total >= 40000 and ((i + 1) % report_interval == 0 or (i + 1) == total):
+            pct = (i + 1) / total * 100.0
+            print(f"        Extracting pairwise features: {i+1:,}/{total:,} ({pct:.1f}%)...")
 
     if not rows:
         return pd.DataFrame(columns=FEATURE_COLUMNS)
