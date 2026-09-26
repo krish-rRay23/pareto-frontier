@@ -307,33 +307,59 @@ def get_trained_model(
     return model, calibrator, policy
 
 
-class CompactTargetStore:
-    """Ultra-compact RAM-safe target store: stores (name, addr, country) tuples instead of heavy dicts."""
+import sqlite3
 
-    def __init__(self):
-        self.data: Dict[str, Tuple[str, str, str]] = {}
 
-    def add(self, eid: str, name: str, addr: str, country: str):
-        c_str = sys.intern(str(country).strip().lower()) if country else "unknown"
-        self.data[eid] = (name, addr, c_str)
+class SQLiteTargetStore:
+    """Zero-RAM target entity store backed by fast local NVMe SSD SQLite database."""
 
-    def __len__(self):
-        return len(self.data)
+    def __init__(self, db_path: str):
+        self.db_path = db_path
 
-    def __getitem__(self, eid: str) -> Dict[str, str]:
-        item = self.data[eid]
-        return {"entity_id": eid, "business_name": item[0], "business_address": item[1], "country": item[2]}
+    def initialize(self):
+        if os.path.exists(self.db_path):
+            try:
+                os.remove(self.db_path)
+            except Exception:
+                pass
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA synchronous = OFF")
+        conn.execute("PRAGMA journal_mode = MEMORY")
+        conn.execute("CREATE TABLE targets (entity_id TEXT PRIMARY KEY, name TEXT, addr TEXT, country TEXT)")
+        conn.commit()
+        conn.close()
 
-    def get(self, eid: str, default=None):
-        if eid in self.data:
-            return self[eid]
-        return default
+    def insert_batch(self, rows: List[Tuple[str, str, str, str]]):
+        conn = sqlite3.connect(self.db_path)
+        conn.executemany("INSERT OR REPLACE INTO targets VALUES (?, ?, ?, ?)", rows)
+        conn.commit()
+        conn.close()
 
-    def __contains__(self, eid: str):
-        return eid in self.data
-
-    def items(self):
-        return self.data.items()
+    def fetch_candidates(self, entity_ids: Set[str]) -> Dict[str, Dict[str, str]]:
+        if not entity_ids:
+            return {}
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        results = {}
+        id_list = list(entity_ids)
+        batch_size = 5000
+        for i in range(0, len(id_list), batch_size):
+            b = id_list[i : i + batch_size]
+            placeholders = ",".join("?" * len(b))
+            rows = cur.execute(
+                f"SELECT entity_id, name, addr, country FROM targets WHERE entity_id IN ({placeholders})",
+                b,
+            ).fetchall()
+            for eid, name, addr, ctry in rows:
+                results[eid] = {
+                    "entity_id": eid,
+                    "business_name": name,
+                    "business_address": addr,
+                    "country": ctry,
+                }
+        conn.close()
+        return results
 
 
 def run_resumable_inference(
@@ -343,6 +369,7 @@ def run_resumable_inference(
     calibrator: ProbabilityCalibrator,
     policy: PrecisionDecisionPolicy,
     chunk_size: int = 25000,
+    local_scratch: str = "/content/local_data",
 ):
     """Run chunked test inference with complete state resumption on restart."""
     import gc
@@ -350,28 +377,37 @@ def run_resumable_inference(
     chunks_dir = os.path.join(output_dir, "chunks")
     os.makedirs(chunks_dir, exist_ok=True)
 
-    console.print(f"[bold cyan]>>> Step 1: Loading Test Reference Targets (Source 2 and 3)...[/bold cyan]")
-    t0_load = time.time()
-    target_store = CompactTargetStore()
+    console.print(f"[bold cyan]>>> Step 1 & 2: Building Local Target DB and Indexing Multi-Channel Retriever...[/bold cyan]")
+    t0_prep = time.time()
+    db_path = os.path.join(local_scratch, "targets.db") if os.path.exists(local_scratch) else os.path.join(test_dir, "targets.db")
+    target_store = SQLiteTargetStore(db_path=db_path)
 
-    for tsv_name in ["test_source2.tsv", "test_source3.tsv"]:
-        p = os.path.join(test_dir, tsv_name)
-        df = pd.read_csv(p, sep="\t", dtype=str, keep_default_na=False, engine="c", on_bad_lines="skip")
-        for eid, bname, baddr, ctry in zip(df["entity_id"], df["business_name"], df["business_address"], df["country"]):
-            target_store.add(eid, bname, baddr, ctry)
-        del df
-        gc.collect()
-
-    console.print(f"[green]Loaded {len(target_store):,} test target pool entities in {time.time()-t0_load:.1f}s (RAM: ~600 MB).[/green]")
-
-    console.print(f"[bold cyan]>>> Step 2: Indexing Targets in Multi-Channel Retriever...[/bold cyan]")
     retriever = MultiChannelBidirectionalRetriever(
         default_budget=35,
         ambiguous_budget=70,
         enable_reverse=False,
     )
-    retriever.fit_targets(target_store.data)
-    target_dict = target_store
+
+    db_already_exists = os.path.isfile(db_path) and os.path.getsize(db_path) > 100_000_000
+    if not db_already_exists:
+        target_store.initialize()
+
+    total_indexed = 0
+    total_expected = 9969589
+
+    for tsv_name in ["test_source2.tsv", "test_source3.tsv"]:
+        p = os.path.join(test_dir, tsv_name)
+        console.print(f"    Streaming and indexing {tsv_name}...")
+        for df_chunk in pd.read_csv(p, sep="\t", dtype=str, keep_default_na=False, engine="c", chunksize=200000, on_bad_lines="skip"):
+            tuples_list = list(zip(df_chunk["entity_id"], df_chunk["business_name"], df_chunk["business_address"], df_chunk["country"]))
+            if not db_already_exists:
+                target_store.insert_batch(tuples_list)
+            retriever.fit_targets(tuples_list, total_expected=total_expected)
+            total_indexed += len(tuples_list)
+            del df_chunk, tuples_list
+            gc.collect()
+
+    console.print(f"[green]Indexed {total_indexed:,} targets into Retriever & Local SSD DB in {time.time()-t0_prep:.1f}s (RAM: ~3.8 GB)![/green]")
     gc.collect()
 
     console.print(f"[bold cyan]>>> Step 3: Resolving Test Source 1 Queries (Streaming Chunks)...[/bold cyan]")
@@ -435,13 +471,14 @@ def run_resumable_inference(
         else:
             # Precompute multi-views on the fly for the unique target candidates in this chunk
             chunk_tids = {tid for _, tid in chunk_pairs}
-            tgt_pre = {tid: precompute_record_views(target_dict[tid]) for tid in chunk_tids if tid in target_dict}
+            chunk_target_dict = target_store.fetch_candidates(chunk_tids)
+            tgt_pre = {tid: precompute_record_views(chunk_target_dict[tid]) for tid in chunk_tids if tid in chunk_target_dict}
 
             # Build features & predict
             X_chunk = build_pairwise_feature_dataframe(
-                chunk_pairs, s1_chunk_dict, target_dict, s1_chunk_pre, tgt_pre, chunk_prov, show_progress=False
+                chunk_pairs, s1_chunk_dict, chunk_target_dict, s1_chunk_pre, tgt_pre, chunk_prov, show_progress=False
             )
-            cons_chunk = compute_s2_s3_consensus(chunk_pairs, target_dict, tgt_pre)
+            cons_chunk = compute_s2_s3_consensus(chunk_pairs, chunk_target_dict, tgt_pre)
             ctx_chunk = compute_context_and_competition_features(chunk_pairs, s1_chunk_pre, tgt_pre)
             X_chunk = pd.concat([X_chunk, cons_chunk, ctx_chunk], axis=1)
 
@@ -453,7 +490,7 @@ def run_resumable_inference(
             matches_dict = exclusivity_resolver.resolve(matches_dict, chunk_pairs, cal_scores)
             matches_dict = contradiction_checker.filter_predictions(matches_dict, s1_chunk_pre, tgt_pre)
 
-            del X_chunk, cons_chunk, ctx_chunk, scores, cal_scores, tgt_pre
+            del chunk_target_dict, X_chunk, cons_chunk, ctx_chunk, scores, cal_scores, tgt_pre
 
         # Write chunk files
         with open(c_match_file, "w", encoding="utf-8") as f_m:
@@ -542,4 +579,5 @@ if __name__ == "__main__":
         calibrator=calib,
         policy=policy,
         chunk_size=args.chunk_size,
+        local_scratch=args.local_scratch,
     )

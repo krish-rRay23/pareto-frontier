@@ -212,13 +212,13 @@ class MultiChannelBidirectionalRetriever:
         self.target_precomputed: Dict[str, Dict[str, Any]] = {}
         self.s1_precomputed_cache: Dict[str, Dict[str, Any]] = {}
 
-    def fit_targets(self, targets: Any) -> "MultiChannelBidirectionalRetriever":
+    def fit_targets(self, targets: Any, total_expected: Optional[int] = None) -> "MultiChannelBidirectionalRetriever":
         """Index all target entities into multi-channel forward indexes with single-pass memory safety.
 
-        Supports both List[Dict] and compact Dict[str, Tuple[str, str, str]] (eid -> (name, addr, country)).
+        Supports List[Dict], Dict[str, Tuple], or List[Tuple[eid, name, addr, country]].
         """
-        total_targets = len(targets)
-        store_precomputed = (total_targets <= 500000 and isinstance(targets, list))
+        total_targets = total_expected if total_expected else (len(targets) if hasattr(targets, "__len__") else 10000000)
+        store_precomputed = (total_targets <= 500000 and isinstance(targets, list) and targets and isinstance(targets[0], dict))
         report_interval = 1000000 if total_targets >= 2000000 else 100000
 
         PUNCT_TABLE = str.maketrans('!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~', ' ' * 32)
@@ -230,6 +230,8 @@ class MultiChannelBidirectionalRetriever:
                 (tid, item[0], item[1], item[2])
                 for tid, item in targets.items()
             )
+        elif isinstance(targets, (list, tuple)) and targets and isinstance(targets[0], (tuple, list)):
+            target_iter = targets
         else:
             target_iter = (
                 (str(t["entity_id"]), str(t.get("business_name") or ""), str(t.get("business_address") or ""), t.get("country"))
