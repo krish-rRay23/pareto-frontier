@@ -364,19 +364,39 @@ def run_resumable_inference(
 
     console.print(f"[green]Loaded {len(target_store):,} test target pool entities in {time.time()-t0_load:.1f}s (RAM: ~600 MB).[/green]")
 
-    console.print(f"[bold cyan]>>> Step 2: Indexing Targets in Multi-Channel Retriever...[/bold cyan]")
-    retriever = MultiChannelBidirectionalRetriever(
-        default_budget=35,
-        ambiguous_budget=70,
-        enable_reverse=False,
-    )
-    retriever.fit_targets(target_store.data)
-    target_dict = target_store
+    # Check if retriever is already cached on disk
+    checkpoint_dir = os.path.join(output_dir, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    local_retriever_ckpt = "/content/local_data/retriever_index.joblib"
 
-    console.print(f"[bold cyan]>>> Step 3: Loading Test Source 1 Queries...[/bold cyan]")
-    s1_test = load_source_tsv(os.path.join(test_dir, "test_source1.tsv"))
-    total_s1 = len(s1_test)
-    console.print(f"[green]Loaded {total_s1:,} Test S1 entities to resolve.[/green]\n")
+    if os.path.isfile(local_retriever_ckpt):
+        console.print(f"[bold green]>>> Loading pre-indexed Retriever from fast SSD: {local_retriever_ckpt}...[/bold green]")
+        retriever = joblib.load(local_retriever_ckpt)
+    else:
+        console.print(f"[bold cyan]>>> Step 2: Indexing Targets in Multi-Channel Retriever...[/bold cyan]")
+        retriever = MultiChannelBidirectionalRetriever(
+            default_budget=35,
+            ambiguous_budget=70,
+            enable_reverse=False,
+        )
+        retriever.fit_targets(target_store.data)
+        # Checkpoint retriever to fast local SSD so we never have to re-index!
+        if os.path.exists("/content/local_data"):
+            try:
+                console.print("    Caching retriever index to local SSD...")
+                joblib.dump(retriever, local_retriever_ckpt, compress=1)
+                console.print("    [green]Retriever index cached successfully![/green]")
+            except Exception as e:
+                console.print(f"    [yellow]Could not cache retriever: {e}[/yellow]")
+
+    target_dict = target_store
+    gc.collect()
+
+    console.print(f"[bold cyan]>>> Step 3: Resolving Test Source 1 Queries (Streaming Chunks)...[/bold cyan]")
+    s1_file = os.path.join(test_dir, "test_source1.tsv")
+    with open(s1_file, "r", encoding="utf-8") as f:
+        total_s1 = max(0, sum(1 for _ in f) - 1)
+    console.print(f"[green]Found {total_s1:,} Test S1 entities to resolve.[/green]\n")
 
     num_chunks = int(math.ceil(total_s1 / chunk_size))
     console.print(f"[bold yellow]Total Chunks: {num_chunks} (Chunk size: {chunk_size:,} records)[/bold yellow]\n")
@@ -386,7 +406,17 @@ def run_resumable_inference(
 
     t_start = time.time()
 
-    for chunk_idx in range(num_chunks):
+    s1_stream = pd.read_csv(
+        s1_file,
+        sep="\t",
+        dtype=str,
+        keep_default_na=False,
+        engine="c",
+        on_bad_lines="skip",
+        chunksize=chunk_size,
+    )
+
+    for chunk_idx, chunk_df in enumerate(s1_stream):
         c_start = chunk_idx * chunk_size
         c_end = min(total_s1, (chunk_idx + 1) * chunk_size)
         c_match_file = os.path.join(chunks_dir, f"matching_chunk_{chunk_idx:04d}.tsv")
@@ -395,10 +425,12 @@ def run_resumable_inference(
         # RESUME CHECK: If chunk already computed, skip!
         if os.path.isfile(c_match_file) and os.path.isfile(c_cand_file):
             console.print(f"[{chunk_idx+1}/{num_chunks}] Chunk {chunk_idx:04d} already completed. [dim]SKIPPING (RESUMED)[/dim]")
+            del chunk_df
             continue
 
         chunk_t0 = time.time()
-        chunk_s1 = s1_test[c_start:c_end]
+        chunk_s1 = chunk_df.to_dict(orient="records")
+        del chunk_df
         s1_chunk_dict = {str(r["entity_id"]): r for r in chunk_s1}
         s1_chunk_pre = {sid: precompute_record_views(s1_chunk_dict[sid]) for sid in s1_chunk_dict}
 
@@ -419,7 +451,7 @@ def run_resumable_inference(
             # All singletons
             matches_dict = {str(s1["entity_id"]): set() for s1 in chunk_s1}
         else:
-            # Precompute multi-views on the fly for the ~50,000 unique target candidates in this chunk (<0.3s)
+            # Precompute multi-views on the fly for the unique target candidates in this chunk
             chunk_tids = {tid for _, tid in chunk_pairs}
             tgt_pre = {tid: precompute_record_views(target_dict[tid]) for tid in chunk_tids if tid in target_dict}
 
@@ -439,6 +471,8 @@ def run_resumable_inference(
             matches_dict = exclusivity_resolver.resolve(matches_dict, chunk_pairs, cal_scores)
             matches_dict = contradiction_checker.filter_predictions(matches_dict, s1_chunk_pre, tgt_pre)
 
+            del X_chunk, cons_chunk, ctx_chunk, scores, cal_scores, tgt_pre
+
         # Write chunk files
         with open(c_match_file, "w", encoding="utf-8") as f_m:
             for s1 in chunk_s1:
@@ -451,6 +485,9 @@ def run_resumable_inference(
                 sid = str(s1["entity_id"])
                 c_str = ",".join(sorted(cands_dict.get(sid, set())))
                 f_c.write(f"{sid}\t{c_str}\n")
+
+        del chunk_s1, s1_chunk_dict, s1_chunk_pre, chunk_pairs, chunk_prov, cands_dict, matches_dict
+        gc.collect()
 
         chunk_elapsed = time.time() - chunk_t0
         progress_pct = (c_end / total_s1) * 100.0
